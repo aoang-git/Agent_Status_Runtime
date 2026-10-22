@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Core/AgentStatus.TestWindow.Core.csproj" />
+  <Project Path="App/AgentStatus.TestWindow.csproj" />
+  <Project Path="Tests/Tests.csproj" />
+</Solution>

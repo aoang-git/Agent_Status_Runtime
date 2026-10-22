@@ -154,7 +154,7 @@ Claude Code 的创建者 Boris Cherny 将其团队的文件控制在约 100 行�
 
 ### 技术栈
 
-- 语言及版本：Go 1.26+
+- 语言及版本：Go 1.26+；测试窗口使用 C# / .NET 10 WinForms
 - 框架：标准 net/http；fsnotify、klauspost/compress/zstd、modernc.org/sqlite
 - 包管理器：Go Modules（runtime/go.mod、go.sum）
 - 运行环境 / 部署目标：当前用户级本机进程；Windows 优先验证，Linux/macOS 交叉构建
@@ -163,6 +163,7 @@ Claude Code 的创建者 Boris Cherny 将其团队的文件控制在约 100 行�
 
 - 安装依赖：在 `runtime` 执行 `go mod download`
 - 构建：在仓库根执行 `./scripts/build.ps1`，或在 `runtime` 执行 `go build ./cmd/agent-statusd`
+- 测试窗口构建与测试：`./scripts/build-test-window.ps1 -Test`；仅测试为 `dotnet test manager/test-window/Tests/Tests.csproj`
 - 运行全部测试：在 `runtime` 执行 `go test ./...`
 - 运行单项测试：在 `runtime` 执行 `go test ./internal/monitor -run TestName`
 - 代码检查：在 `runtime` 执行 `go vet ./...`
@@ -173,8 +174,8 @@ Claude Code 的创建者 Boris Cherny 将其团队的文件控制在约 100 行�
 
 ### 目录结构
 
-- 源代码位置：`runtime/cmd`、`runtime/internal/monitor`
-- 测试代码位置：`runtime/internal/monitor/*_test.go`，样本为人工构造的脱敏记录
+- 源代码位置：`runtime/cmd`、`runtime/internal/monitor`；窗口为 `manager/test-window/App`、`Core`
+- 测试代码位置：`runtime/internal/monitor/*_test.go`、`manager/test-window/Tests`，样本为人工构造的脱敏记录
 - 禁止修改的位置：Agent 自身配置和持久化记录；`.tools` 依赖源码不可作为项目实现修改
 
 ### 本仓库特有约定
@@ -196,6 +197,7 @@ Claude Code 的创建者 Boris Cherny 将其团队的文件控制在约 100 行�
 当用户纠正你的处理方式时，在会话结束前将其写成一条简短规则，追加在这里。规则必须具体（如“处理 Y 时始终使用 X”），不能空泛（如“处理 Y 时要小心”）。如果现有规则已经覆盖这次纠正，应完善现有规则，而不是再增加一条。当造成问题的基础条件已经消失时（例如模型升级、代码重构或流程变化），应移除不再适用的规则。
 
 - 首期优先实现无需修改 Agent 配置的文件被动监测；Hooks 安装、信任及其他配置增强留到后续适配。
+- 测试窗口只读现有 HTTP/SSE，不启动、停止或配置 Runtime；窗口集成测试必须使用独立临时 Runtime 和构造日志。
 - PowerShell 多步骤文件替换使用 `$ErrorActionPreference = 'Stop'`；更新后台程序前等待所属进程退出，并校验替换后的文件，避免失败后仍启动旧版本。
 
 ---

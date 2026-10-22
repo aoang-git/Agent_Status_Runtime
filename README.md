@@ -32,6 +32,22 @@ CLI 与桌面共用文件解析器，桌面版本兼容性仍需独立验证。�
 
 默认寻找 `~/.codex/sessions`、`~/.claude/projects`、`~/.dsh/sessions`、`~/.pi/agent/sessions`，识别 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DSH_HOME`、`PI_CODING_AGENT_SESSION_DIR`。非标准位置可临时传入多个 `--root codex=D:\path\sessions`；传入后只扫描指定根，不修改任何 Agent 文件。未创建的默认目录会由后续补偿扫描发现。
 
+### Windows 测试窗口
+
+双击 `bin/agent-status-test.exe`，或指定 Runtime 数据目录：
+
+```powershell
+.\bin\agent-status-test.exe --data-dir .\.runtime\live
+```
+
+这是 Windows x64 自包含程序，运行时无需安装 .NET。未指定目录时，优先使用程序旁项目的 `.runtime/live`（存在连接文件时），否则使用当前用户配置目录下的 `AgentStatusRuntime`。窗口可选择其他数据目录，也可手动重新连接。
+
+窗口只读取真实 HTTP/SSE 数据，**不会启动、停止或配置 Runtime**；请先单独运行服务。关闭窗口不会影响后台监测。会话页支持 Agent、状态筛选及完整身份、工具、审批详情；实时事件页最多保留 500 条，支持清空和暂停滚动；采集诊断页显示根目录、文件通知、来源降级原因及四类 Agent 的能力限制。缺失字段显示“未提供”，推断等待、未知和明确回合完成分别显示。
+
+连接状态栏每秒显示全局最新活动摘要，例如 `已连接 | Codex：工作中...26s`、`已连接 | 无活动：空闲...1m10s`。优先显示有新鲜证据的活动会话；没有活动时参考最近会话，证据不足保留“未知”。计时表示距所显示会话最新证据的时间，不是精确任务耗时，不受列表筛选影响；断线时显示连接错误并保留会话快照。
+
+连接中断后保留最后快照和接收时间，按 1、2、5、10 秒重试，后续最多间隔 10 秒。每次重连重新读取连接文件，适应服务重启后地址和令牌变化；45 秒无事件或心跳会断开重试。诊断与权威状态每 5 秒核对；SSE 按 `epoch:revision` 恢复，reset 标记事件间隙，历史快照不会生成完成事件。连接仅接受 HTTP loopback IP，禁用代理和自动重定向，令牌不展示、不记录。
+
 ### 构建与测试
 
 需要 Go 1.26+。构建前停止正在运行的同名程序。Windows 构建脚本优先使用项目内 `.tools/go` 便携工具链，否则使用 PATH 中的 Go：
@@ -51,6 +67,16 @@ go build -trimpath -o ../bin/agent-statusd ./cmd/agent-statusd
 
 依赖由 `runtime/go.mod` 与 `go.sum` 锁定。Go 纯代码 SQLite，无需 C 编译器。二进制、构建缓存和本机状态均已加入忽略列表。
 
+测试窗口独立使用 .NET 10 SDK 构建，只需关闭正在运行的测试窗口，无需停止 Runtime：
+
+```powershell
+.\scripts\build-test-window.ps1 -Test
+# 只运行窗口测试：
+dotnet test .\manager\test-window\Tests\Tests.csproj
+```
+
+脚本发布单文件 `bin/agent-status-test.exe`，不构建或替换 Runtime 二进制。源码分为 `manager/test-window/App`（WinForms）、`Core`（HTTP/SSE 与状态）、`Tests`（MSTest）。集成测试需要已构建的 `bin/agent-statusd.exe`，会启动独立临时 Runtime 并写入人工构造日志，结束后清理自己的进程与目录，不操作真实 Agent 日志。
+
 ### 接口与已知限制
 
 `GET /v1/info`、`/v1/health`、`/v1/status`、`/v1/sessions`、`/v1/capabilities`、`/v1/events` 均需 `Authorization: Bearer <token>`。连接地址与令牌保存在 `<data-dir>/private/connection.json`；CLI 自动读取，不将令牌放进 URL。HTTP 不接收跨源浏览器请求。
@@ -69,3 +95,4 @@ Runtime 仅读取 Agent 文件，数据库保存白名单状态元信息及检�
 - [软件架构设计](doc/agent状态统一监测项目架构.md)
 - [可行性研究](doc/agent状态统一监测计划.md)
 - [v0.1 验证记录](doc/v0.1验证记录.md)
+- [测试窗口验证记录](doc/测试窗口验证记录.md)
