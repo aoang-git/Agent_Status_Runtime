@@ -154,39 +154,38 @@ Claude Code 的创建者 Boris Cherny 将其团队的文件控制在约 100 行�
 
 ### 技术栈
 
-- 语言及版本：
-- 框架：
-- 包管理器：
-- 运行环境 / 部署目标：
+- 语言及版本：Go 1.26+
+- 框架：标准 net/http；fsnotify、klauspost/compress/zstd、modernc.org/sqlite
+- 包管理器：Go Modules（runtime/go.mod、go.sum）
+- 运行环境 / 部署目标：当前用户级本机进程；Windows 优先验证，Linux/macOS 交叉构建
 
 ### 常用命令
 
-- 安装：`TODO`
-- 构建：`TODO`
-- 运行全部测试：`TODO`
-- 运行单个文件的测试：`TODO`
-- 代码检查（Lint）：`TODO`
-- 类型检查：`TODO`
-- 本地运行：`TODO`
+- 安装依赖：在 `runtime` 执行 `go mod download`
+- 构建：在仓库根执行 `./scripts/build.ps1`，或在 `runtime` 执行 `go build ./cmd/agent-statusd`
+- 运行全部测试：在 `runtime` 执行 `go test ./...`
+- 运行单项测试：在 `runtime` 执行 `go test ./internal/monitor -run TestName`
+- 代码检查：在 `runtime` 执行 `go vet ./...`
+- 类型检查：Go 构建及测试自动检查
+- 本地运行：`./bin/agent-statusd.exe serve --data-dir ./.runtime/live`
 
 迭代期间优先运行单文件或单项测试；完整测试套件留到最终验证阶段运行。
 
 ### 目录结构
 
-- 源代码位置：`TODO`
-- 测试代码位置：`TODO`
-- 禁止修改的位置：`TODO`（自动生成代码、引入的第三方依赖、旧系统区域等）
+- 源代码位置：`runtime/cmd`、`runtime/internal/monitor`
+- 测试代码位置：`runtime/internal/monitor/*_test.go`，样本为人工构造的脱敏记录
+- 禁止修改的位置：Agent 自身配置和持久化记录；`.tools` 依赖源码不可作为项目实现修改
 
 ### 本仓库特有约定
 
-- 命名规范：`TODO`
-- 导入风格：`TODO`
-- 错误处理模式：`TODO`
-- 测试模式与框架：`TODO`
+- 命名和导入风格：遵循 Go 惯例，使用 gofmt
+- 错误处理：单源解析错误降级该来源；数据库提交错误停止扫描，不推进内存游标
+- 测试模式与框架：Go testing + httptest，包含 SQLite 和实际 loopback HTTP/SSE
 
 ### 禁止事项
 
-- `TODO`：看起来合理，但实际上会破坏本项目的做法。
+- 禁止用日志静默、进程退出或消息结束伪造回合完成；不得把原始会话正文写入数据库、日志或 API。
 
 ---
 
@@ -196,7 +195,8 @@ Claude Code 的创建者 Boris Cherny 将其团队的文件控制在约 100 行�
 
 当用户纠正你的处理方式时，在会话结束前将其写成一条简短规则，追加在这里。规则必须具体（如“处理 Y 时始终使用 X”），不能空泛（如“处理 Y 时要小心”）。如果现有规则已经覆盖这次纠正，应完善现有规则，而不是再增加一条。当造成问题的基础条件已经消失时（例如模型升级、代码重构或流程变化），应移除不再适用的规则。
 
-- （暂无）
+- 首期优先实现无需修改 Agent 配置的文件被动监测；Hooks 安装、信任及其他配置增强留到后续适配。
+- PowerShell 多步骤文件替换使用 `$ErrorActionPreference = 'Stop'`；更新后台程序前等待所属进程退出，并校验替换后的文件，避免失败后仍启动旧版本。
 
 ---
 
