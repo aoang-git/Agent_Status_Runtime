@@ -171,6 +171,7 @@ public sealed class ClientTests
             if (route == "/v2/health") return JsonResponse(new Health([], [], "polling"));
             if (route == "/v2/capabilities") return JsonResponse(Array.Empty<Capability>());
             if (route == "/v2/snapshot") return JsonResponse(new RuntimeSnapshot(2,"a",0,[]));
+            Assert.IsFalse(request.Headers.Contains("Last-Event-ID"), "每次连接应建立新基线，不恢复断线期间的事实流。");
             if (Interlocked.Increment(ref streams) == 1)
             {
                 await File.WriteAllTextAsync(path, Json(new { url = "http://127.0.0.1:9120", token = "new-token" }), token);
@@ -182,7 +183,9 @@ public sealed class ClientTests
                 Content = new StringContent($"id: {snapshot.Id}\nevent: snapshot\ndata: {snapshot.Data}\n\n", Encoding.UTF8, "text/event-stream")
             };
         }));
-        using var controller = new MonitorController(new(), client);
+        var state = new MonitorState();
+        state.Apply(Snapshot());
+        using var controller = new MonitorController(state, client);
         controller.Changed += () => { if (controller.State.View().Sessions.Length == 1) stop.Cancel(); };
         await controller.RunAsync(root.Path, stop.Token);
         Assert.IsTrue(newTokenSeen);

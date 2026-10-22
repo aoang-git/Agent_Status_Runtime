@@ -160,6 +160,52 @@ public sealed class WindowTests
         if(failure is not null)ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
+    [TestMethod]
+    public void BannerIgnoresSnapshotResultsAndCoverageAndClearsExpiredLiveNotice()
+    {
+        using var root = new TempDirectory();
+        Exception? failure = null;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                using var form = new MainForm(root.Path);
+                var flags = BindingFlags.Instance | BindingFlags.NonPublic;
+                typeof(MainForm).GetField("closing", flags)!.SetValue(form, true);
+                form.Show();
+                ((System.Windows.Forms.Timer)typeof(MainForm).GetField("renderTimer", flags)!.GetValue(form)!).Stop();
+                Application.DoEvents();
+                typeof(MainForm).GetField("closing", flags)!.SetValue(form, false);
+                var controller = (MonitorController)typeof(MainForm).GetField("controller", flags)!.GetValue(form)!;
+                typeof(MonitorController).GetField("connection", flags)!.SetValue(controller, new ConnectionStatus("connected", "test"));
+                string Json(object value) => JsonSerializer.Serialize(value, Wire.Json);
+                var now = DateTimeOffset.UtcNow;
+                var end = new Fact { Id = 1, Agent = "codex", SessionNamespace = "test", SessionId = "session", SourceId = "test", Origin = "file",
+                    OperationId = "op", Kind = "lifecycle.observed", Data = new() { Phase = "ended", Scope = "agent_turn", Outcome = "completed" } };
+                controller.State.Apply(new("ui:1", "snapshot", Json(new RuntimeSnapshot(2, "ui", 1,
+                    [new("codex", "test", "session", "test", "file", [end], "partial")], "partial"))), now);
+                var banner = (Control)typeof(MainForm).GetField("statusLabel", flags)!.GetValue(form)!;
+                void Render()
+                {
+                    typeof(MainForm).GetField("dirty", flags)!.SetValue(form, 1);
+                    typeof(MainForm).GetMethod("Render", flags)!.Invoke(form, null);
+                }
+                Render(); Assert.AreEqual("已连接 | 无活动", banner.Text);
+                var input = end with { Id = 2, OperationId = "new", Kind = "input.observed", Data = new() };
+                controller.State.Apply(new("ui:2", "fact", Json(input)), now.AddSeconds(-60));
+                Render(); StringAssert.Contains(banner.Text, "Codex：工作中 · 1m");
+                controller.State.Apply(new("ui:3", "fact", Json(end with { Id = 3, OperationId = "new" })), now.AddSeconds(-11));
+                Render(); Assert.AreEqual("已连接 | 无活动", banner.Text);
+                Assert.IsFalse(Directory.Exists(Path.Combine(root.Path, "private")));
+                form.Close();
+            }
+            catch (Exception error) { failure = error; }
+        });
+        thread.SetApartmentState(ApartmentState.STA); thread.Start();
+        Assert.IsTrue(thread.Join(TimeSpan.FromSeconds(10)), "状态摘要测试未结束。");
+        if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
     private sealed class NativeDrawingCounter : NativeWindow, IDisposable
     {
         public int DrawItems { get; private set; }

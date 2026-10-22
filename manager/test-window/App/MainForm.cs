@@ -235,8 +235,7 @@ public sealed class MainForm : Form
         endpointLabel.Text = $"服务：{Display.Value(view.Connection.Address)}    Runtime：{Display.Value(view.Info?.Version)}    ";
         lastReceivedLabel.Text = $"最后接收：{(view.LastReceivedAt is { } time ? Display.Time(time) : "未提供")}";
         string phase = view.Connection.Phase switch { "connected" => "已连接", "connecting" => "连接中", _ => "未连接" };
-        statusLabel.Text = $"{phase} | {(view.Connection.Phase == "connected" ? Display.Activity(data.Sessions, now) : view.Connection.Message)}"
-            + (data.Coverage != "complete" ? " | 事实覆盖不完整／历史存在缺口" : "");
+        statusLabel.Text = $"{phase} | {(view.Connection.Phase == "connected" ? Display.Activity(data.Activity, now) : view.Connection.Message)}";
         statusLabel.BackColor = view.Connection.Phase switch { "connected" => Color.FromArgb(225, 243, 233), "connecting" => Color.FromArgb(229, 237, 253), _ => Color.FromArgb(255, 240, 221) };
         statusLabel.ForeColor = view.Connection.Phase == "connected" ? Color.FromArgb(21, 100, 65) : Color.FromArgb(102, 64, 24);
         RenderSessions(data);
@@ -304,8 +303,9 @@ public sealed class MainForm : Form
         {
             var f = e.Fact;
             int index = eventsGrid.Rows.Add(Display.Time(e.ReceivedAt), e.IsNotification ? "任务结束通知" : Display.Event(f?.Kind ?? e.Type),
-                Display.Agent(f?.Agent ?? ""), f?.SessionId ?? "—", Display.Origin(f?.Origin), Display.EventState(e),
-                f is null ? "—" : Display.Basis(f), Display.EventDescription(e));
+                Display.Agent(f?.Agent ?? e.Session?.Agent ?? ""), f?.SessionId ?? e.Session?.NativeSessionId ?? "—",
+                f is null && e.Session is not null ? "客户端推断" : Display.Origin(f?.Origin), Display.EventState(e),
+                f is null ? e.Session is null ? "—" : Display.Reason(e.Session.Reason) : Display.Basis(f), Display.EventDescription(e));
             eventsGrid.Rows[index].Tag = e;
             if (e.IsNotification)
             {

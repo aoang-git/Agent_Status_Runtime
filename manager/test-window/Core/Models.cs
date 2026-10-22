@@ -29,6 +29,10 @@ public sealed record Session
     public string Reason { get; init; } = "";
     public string? Outcome { get; init; }
     public DateTimeOffset UpdatedAt { get; init; }
+    public DateTimeOffset? StartedAt { get; init; }
+    public DateTimeOffset? EndedAt { get; init; }
+    public DateTimeOffset LastActivityAt { get; init; }
+    public string OperationScope { get; init; } = "agent_turn";
     public string SourceHealth { get; init; } = "";
     public string Freshness { get; init; } = "";
     public Dictionary<string, bool>? PendingTools { get; init; }
@@ -127,4 +131,4 @@ public sealed record Cursor(string Epoch, long Revision)
 public sealed record SseMessage(string Id, string Type, string Data);
 public sealed record ClientEvent(DateTimeOffset ReceivedAt, string Type, Session? Session, string Summary,
     Fact? Fact = null, bool IsNotification = false, string? NotificationOutcome = null);
-public sealed record StateView(Session[] Sessions, ClientEvent[] Events, Cursor? Cursor, long Version, string Coverage = "complete");
+public sealed record StateView(Session[] Sessions, ClientEvent[] Events, Cursor? Cursor, long Version, string Coverage = "complete", Session? Activity = null);

@@ -28,8 +28,9 @@ internal static class Display
     {
         if (e.IsNotification)
         {
-            string result = e.NotificationOutcome switch { "completed" => "任务完成", "interrupted" => "任务中断", "failed" => "任务失败", _ => "结束（结果未知）" };
-            return result + (e.Fact?.Origin == "external" ? "（外部报告）" : "");
+            string result = e.NotificationOutcome switch { "completed" => "任务完成", "interrupted" => "任务中断", "failed" => "任务失败",
+                "timeout" => "任务结束（超时推断）", "inferred" => "任务结束（推断）", _ => "结束（结果未知）" };
+            return result + ((e.Fact?.Origin ?? e.Session?.Origin) == "external" ? "（外部报告）" : "");
         }
         if (e.Fact is not { } f) return "—";
         return f.Kind switch
@@ -57,9 +58,12 @@ internal static class Display
         "explicit_end" => "明确结束边界（外部来源仍属于来源声明）",
         "stale_evidence" => "活动证据已过期，无法确认当前状态",
         "source_unavailable" => "当前证据来源不可用或降级",
+        "inactivity_timeout" => "普通活动 5 分钟、审批等待 30 分钟无新活动，客户端推断任务结束；未确认成功或中断",
         _ => Value(value)
     };
-    public static string FactDetail(ClientEvent e) => e.Fact is not { } f ? e.Summary : $"""
+    public static string FactDetail(ClientEvent e) => e.Fact is not { } f ? e.Session is { } session
+        ? $"{e.Summary}{Environment.NewLine}Agent：{Agent(session.Agent)}；本轮开始：{(session.StartedAt is { } start ? Time(start) : "未提供")}；结束：{(session.EndedAt is { } end ? Time(end) : "未提供")}；总时长：{Duration(session, e.ReceivedAt)}"
+        : e.Summary : $"""
         {Event(f.Kind)}：{EventState(e)}
         来源：{Origin(f.Origin)} / {Value(f.SourceId)}
         producer_id：{Value(f.ProducerId)}    event_id：{Value(f.EventId)}    fact_id：{f.Id}
@@ -79,26 +83,25 @@ internal static class Display
     public static Color StateColor(string value) => value switch
     { "working" => Color.FromArgb(29, 78, 216), "tool_activity" => Color.FromArgb(109, 40, 217), "waiting_confirmation" => Color.FromArgb(146, 64, 14), "idle" => Color.FromArgb(21, 100, 65), _ => Color.FromArgb(92, 104, 122) };
 
-    public static string Activity(Session[] sessions, DateTimeOffset now)
+    public static string Activity(Session? latest, DateTimeOffset now)
     {
-        var available = sessions.Where(s => s.SourceHealth is not ("superseded" or "unavailable"));
-        var active = available.Where(s => s.Freshness == "fresh" &&
-            s.State is "working" or "tool_activity" or "waiting_confirmation")
-            .OrderByDescending(s => s.UpdatedAt).ThenBy(s => s.SessionId).FirstOrDefault();
-        var latest = active ?? available.OrderByDescending(s => s.UpdatedAt).ThenBy(s => s.SessionId).FirstOrDefault();
-        string label = active is not null ? $"{Agent(active.Agent)}：{SessionState(active)}"
-            : $"无活动：{(latest?.State == "idle" ? SessionState(latest) : "未知")}";
-        if (latest is not null)
-        {
-            if (latest.Origin == "external") label += "（外部报告）";
-            else if (active is not null && latest.Confidence == "inferred" && latest.State != "waiting_confirmation") label += "（推断）";
-            if (latest.Freshness == "stale") label += "（证据过期）";
-        }
-        if (latest is null || latest.UpdatedAt == default) return $"{label}...未提供";
-        var elapsed = TimeSpan.FromSeconds(Math.Max(0, Math.Floor((now - latest.UpdatedAt).TotalSeconds)));
+        if (latest is null || latest.State == "idle" && latest.EndedAt is null) return "无活动";
+        string state = latest.EndedAt is null ? latest.State == "waiting_confirmation" ? "等待确认" : State(latest.State)
+            : latest.Outcome switch { "completed" => "任务完成", "interrupted" => "任务中断", "failed" => "任务失败",
+                _ => latest.Reason == "inactivity_timeout" ? "任务结束（超时推断）" : "任务结束（推断）" };
+        string label = $"{Agent(latest.Agent)}：{state}";
+        if (latest.Origin == "external") label += "（外部报告）";
+        if (latest.EndedAt is null && latest.Freshness == "stale") label += "（证据过期）";
+        return $"{label} · {Duration(latest, now)}";
+    }
+
+    public static string Duration(Session session, DateTimeOffset now)
+    {
+        if (session.StartedAt is not { } start) return "时长未知";
+        var elapsed = TimeSpan.FromSeconds(Math.Max(0, Math.Floor(((session.EndedAt ?? now) - start).TotalSeconds)));
         string duration = elapsed.TotalHours >= 1 ? $"{(long)elapsed.TotalHours}h{elapsed.Minutes}m{elapsed.Seconds}s"
             : elapsed.TotalMinutes >= 1 ? $"{(int)elapsed.TotalMinutes}m{elapsed.Seconds}s" : $"{elapsed.Seconds}s";
-        return $"{label}...{duration}";
+        return duration;
     }
 
     public static string Detail(Session s) => $"""

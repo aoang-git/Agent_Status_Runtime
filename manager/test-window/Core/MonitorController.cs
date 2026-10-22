@@ -30,9 +30,9 @@ public sealed class MonitorController(MonitorState state, RuntimeClient? client 
     public async Task RunAsync(string directory, CancellationToken cancellationToken)
     {
         int failures = 0;
-        bool fresh = State.View().Cursor is null;
         while (!cancellationToken.IsCancellationRequested)
         {
+            State.ResetMonitoring();
             SetConnection(new("connecting", "正在读取连接信息并检查服务…"));
             using var attempt = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             Task? stream = null, diagnostics = null;
@@ -45,13 +45,10 @@ public sealed class MonitorController(MonitorState state, RuntimeClient? client 
                     throw new InvalidDataException("不兼容的 Runtime 协议版本。");
                 lock (gate) info = runtimeInfo;
                 await RefreshDiagnostics(endpoint, attempt.Token);
-                var cursor = State.View().Cursor;
-                if (cursor?.Epoch != runtimeInfo.Epoch) fresh = true;
                 diagnostics = PollDiagnostics(endpoint, attempt.Token);
-                stream = client.SubscribeAsync(endpoint, fresh ? null : cursor, message =>
+                stream = client.SubscribeAsync(endpoint, null, message =>
                 {
                     if (State.Apply(message)) Changed?.Invoke();
-                    fresh = false;
                     failures = 0;
                     return Task.CompletedTask;
                 }, () =>
@@ -69,7 +66,6 @@ public sealed class MonitorController(MonitorState state, RuntimeClient? client 
             catch (Exception error) when (error is IOException or HttpRequestException or JsonException
                 or InvalidDataException or UnauthorizedAccessException or OperationCanceledException or TimeoutException)
             {
-                if (error is InvalidDataException or JsonException) fresh = true;
                 failures++;
                 var delay = RetryDelay(failures);
                 var address = View().Connection.Address;
@@ -77,6 +73,7 @@ public sealed class MonitorController(MonitorState state, RuntimeClient? client 
             }
             finally
             {
+                State.ResetMonitoring();
                 attempt.Cancel();
                 foreach (var task in new[] { stream, diagnostics })
                 {

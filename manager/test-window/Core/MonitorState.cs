@@ -7,6 +7,8 @@ public sealed class MonitorState
     private readonly Queue<ClientEvent> events = new();
     private readonly HashSet<string> endings = new();
     private readonly Queue<string> endingOrder = new();
+    private readonly LatestActivity activity = new();
+    private bool monitoring;
     private Cursor? cursor;
     private long viewRevision, version;
     private string snapshotCoverage = "complete";
@@ -14,9 +16,17 @@ public sealed class MonitorState
 
     public StateView View(DateTimeOffset? now = null)
     {
-        lock (gate) return new(DefaultInterpreter.Project(ledgers.Values, now ?? DateTimeOffset.UtcNow), events.ToArray(), cursor, version,
-            streamGap || snapshotCoverage != "complete" || ledgers.Values.Any(s=>s.Coverage!="complete") ? "partial" : "complete");
+        lock (gate)
+        {
+            var time = now ?? DateTimeOffset.UtcNow;
+            if (monitoring && activity.Tick(time) is { } notification) Add(notification);
+            return new(DefaultInterpreter.Project(ledgers.Values, time), events.ToArray(), cursor, version,
+                streamGap || snapshotCoverage != "complete" || ledgers.Values.Any(s=>s.Coverage!="complete") ? "partial" : "complete", activity.Visible(time));
+        }
     }
+
+    public void ResetMonitoring()
+    { lock (gate) { monitoring = false; activity.Reset(); version++; } }
 
     private static void Validate(RuntimeSnapshot snapshot)
     {
@@ -43,20 +53,22 @@ public sealed class MonitorState
         return true;
     }
 
-    public bool Apply(SseMessage message)
+    public bool Apply(SseMessage message, DateTimeOffset? receivedAt = null)
     {
         var next = Cursor.Parse(message.Id);
         lock (gate)
         {
+            var time = receivedAt ?? DateTimeOffset.UtcNow;
             if (message.Type is "snapshot" or "reset")
             {
                 var snapshot = Wire.Read<RuntimeSnapshot>(message.Data); Validate(snapshot);
                 if (snapshot.Epoch != next.Epoch || snapshot.Revision != next.Revision) throw new InvalidDataException("快照与游标不一致。");
-                if (cursor is not null && next.Epoch == cursor.Epoch && next.Revision <= cursor.Revision) return false;
+                if (monitoring && cursor is not null && next.Epoch == cursor.Epoch && next.Revision <= cursor.Revision) return false;
                 if (cursor?.Epoch != next.Epoch) { endings.Clear(); endingOrder.Clear(); viewRevision = 0; }
                 if (next.Revision >= viewRevision) Replace(snapshot);
                 foreach (var fact in snapshot.Sessions.SelectMany(s => s.Facts)) if (DefaultInterpreter.EndOutcome(fact) is not null) RememberEnd(fact);
                 cursor = next;
+                activity.Reset(); monitoring = true;
                 if (message.Type == "reset") streamGap = true;
                 Add(new(DateTimeOffset.UtcNow, message.Type, null, message.Type == "reset"
                     ? "事实流已重置，存在无法重放的区间；快照不生成完成通知。" : $"建立事实快照：{snapshot.Sessions.Length} 个来源会话（不产生完成通知）。"));
@@ -74,9 +86,15 @@ public sealed class MonitorState
             if (next.Revision > viewRevision) ApplyFact(factUpdate);
             if (factUpdate.SequenceGap) streamGap = true;
             string? end = DefaultInterpreter.EndOutcome(factUpdate);
-            bool notification = end is not null && RememberEnd(factUpdate) && !factUpdate.Historical;
+            bool uniqueEnd = end is null || RememberEnd(factUpdate);
+            ClientEvent? notification = null;
+            if (monitoring && !factUpdate.Historical)
+            {
+                if (activity.Tick(time) is { } inferred) Add(inferred);
+                if (uniqueEnd) notification = activity.Apply(factUpdate, time);
+            }
             cursor = next; viewRevision = Math.Max(viewRevision, next.Revision);
-            Add(new(DateTimeOffset.UtcNow, "fact", null, "", factUpdate, notification, notification ? end : null));
+            Add(new(time, "fact", notification?.Session, "", factUpdate, notification is not null, notification?.NotificationOutcome));
             return true;
         }
     }
