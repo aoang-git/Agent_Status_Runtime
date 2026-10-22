@@ -43,7 +43,7 @@ func main() {
 }
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: agent-statusd serve|status|doctor|watch|version [flags]")
+		return errors.New("usage: agent-statusd serve|status|doctor|watch|report|integration-prompt|version [flags]")
 	}
 	if args[0] == "version" {
 		fmt.Println(monitor.Version)
@@ -57,7 +57,8 @@ func run(args []string) error {
 	dataDir := flags.String("data-dir", filepath.Join(base, "AgentStatusRuntime"), "runtime-owned data directory")
 	listen := flags.String("listen", "127.0.0.1:9120", "loopback address (serve)")
 	interval := flags.Duration("interval", 5*time.Second, "fallback discovery scan interval")
-	stale := flags.Duration("stale-after", 2*time.Minute, "active evidence freshness limit; never implies completion")
+	bestEffort := flags.Bool("best-effort", false, "report silently without blocking the Agent on failure")
+	validateOnly := flags.Bool("validate-only", false, "validate report JSON without contacting Runtime")
 	var roots rootsFlag
 	flags.Var(&roots, "root", "session root agent=path (repeatable; overrides automatic discovery)")
 	if err := flags.Parse(args[1:]); err != nil {
@@ -65,6 +66,21 @@ func run(args []string) error {
 	}
 	if flags.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
+	}
+	if args[0] == "report" {
+		return report(*dataDir, *bestEffort, *validateOnly)
+	}
+	if args[0] == "integration-prompt" {
+		exe, err := os.Executable()
+		if err != nil {
+			return errors.New("executable_path_unavailable")
+		}
+		directory, err := filepath.Abs(*dataDir)
+		if err != nil {
+			return errors.New("invalid_data_dir")
+		}
+		fmt.Print(monitor.IntegrationPrompt(exe, directory))
+		return nil
 	}
 	if args[0] != "serve" {
 		return client(args[0], *dataDir)
@@ -93,7 +109,7 @@ func run(args []string) error {
 		return err
 	}
 	defer release()
-	store, err := monitor.OpenStore(dbPath)
+	store, err := monitor.OpenStore(filepath.Join(private, "facts-v2.sqlite"))
 	if err != nil {
 		return err
 	}
@@ -101,7 +117,7 @@ func run(args []string) error {
 	if len(roots) == 0 {
 		roots = monitor.DefaultRoots()
 	}
-	engine, err := monitor.NewEngine(store, roots, *stale)
+	engine, err := monitor.NewEngine(store, roots)
 	if err != nil {
 		return err
 	}
@@ -114,6 +130,7 @@ func run(args []string) error {
 	}
 	defer listener.Close()
 	token := monitor.NewToken()
+	writeToken := monitor.NewToken()
 	url := "http://" + listener.Addr().String()
 	connFile := filepath.Join(private, "connection.json")
 	b, _ := json.Marshal(connection{url, token})
@@ -121,13 +138,19 @@ func run(args []string) error {
 		return err
 	}
 	defer os.Remove(connFile)
+	ingestFile := filepath.Join(private, "ingest.json")
+	b, _ = json.Marshal(connection{url, writeToken})
+	if err := os.WriteFile(ingestFile, b, 0600); err != nil {
+		return err
+	}
+	defer os.Remove(ingestFile)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
-	server := &http.Server{Handler: monitor.Handler(engine, token), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10, BaseContext: func(net.Listener) context.Context { return ctx }}
+	server := &http.Server{Handler: monitor.Handler(engine, token, writeToken), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10, BaseContext: func(net.Listener) context.Context { return ctx }}
 	errorsCh := make(chan error, 2)
 	go func() { errorsCh <- engine.Run(ctx, *interval) }()
 	go func() { errorsCh <- server.Serve(listener) }()
-	fmt.Fprintln(os.Stderr, "Agent Status Runtime", monitor.Version, "passive", url)
+	fmt.Fprintln(os.Stderr, "Agent Status Runtime", monitor.Version, "facts", url)
 	select {
 	case <-ctx.Done():
 	case err = <-errorsCh:
@@ -145,23 +168,19 @@ func run(args []string) error {
 }
 
 func client(command, dataDir string) error {
-	path := "/v1/status"
+	path := "/v2/snapshot"
 	switch command {
 	case "status":
 	case "doctor":
-		path = "/v1/health"
+		path = "/v2/health"
 	case "watch":
-		path = "/v1/events"
+		path = "/v2/events"
 	default:
 		return errors.New("unknown command")
 	}
-	b, err := os.ReadFile(filepath.Join(dataDir, "private", "connection.json"))
+	conn, err := loadConnection(dataDir, "connection.json")
 	if err != nil {
-		return errors.New("runtime connection unavailable; start 'agent-statusd serve' first")
-	}
-	var conn connection
-	if json.Unmarshal(b, &conn) != nil {
-		return errors.New("invalid connection file")
+		return err
 	}
 	req, err := http.NewRequest("GET", conn.URL+path, nil)
 	if err != nil {
@@ -170,7 +189,7 @@ func client(command, dataDir string) error {
 	req.Header.Set("Authorization", "Bearer "+conn.Token)
 	transport := &http.Transport{Proxy: nil}
 	defer transport.CloseIdleConnections()
-	httpClient := &http.Client{Transport: transport, Timeout: 10 * time.Second}
+	httpClient := &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	if command == "watch" {
 		httpClient.Timeout = 0
 	}

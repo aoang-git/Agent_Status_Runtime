@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace AgentStatus.TestWindow.Core;
 
@@ -32,13 +33,69 @@ public sealed record Session
     public string Freshness { get; init; } = "";
     public Dictionary<string, bool>? PendingTools { get; init; }
     public Dictionary<string, bool>? PendingApprovals { get; init; }
+    public string SessionNamespace { get; init; } = "";
+    public string Origin { get; init; } = "file";
+    public string ReportedBasis { get; init; } = "";
+    public string Coverage { get; init; } = "complete";
+    public string RuleVersion { get; init; } = DefaultInterpreter.Version;
 }
 
-public sealed record RuntimeSnapshot(int Schema, string Epoch, long Revision, Session[] Sessions);
+public sealed record FactData
+{
+    public string? Surface { get; init; }
+    public string? AgentVersion { get; init; }
+    public string? ParentSessionId { get; init; }
+    public string? Role { get; init; }
+    public string? StopReason { get; init; }
+    public string? Phase { get; init; }
+    public string? Scope { get; init; }
+    public string? Outcome { get; init; }
+    public string? CallId { get; init; }
+    public string? RequestId { get; init; }
+    public string? Decision { get; init; }
+    public string? State { get; init; }
+    public string? MessageId { get; init; }
+    public string? ParentNodeId { get; init; }
+    public bool? BranchChanged { get; init; }
+    public bool? HasTools { get; init; }
+    public string? Health { get; init; }
+    public string? Reason { get; init; }
+}
+public sealed record Fact
+{
+    public int Schema { get; init; } = 2;
+    public long Id { get; init; }
+    public string ProducerId { get; init; } = "";
+    public string EventId { get; init; } = "";
+    public string Agent { get; init; } = "";
+    public string SessionNamespace { get; init; } = "";
+    public string SessionId { get; init; } = "";
+    public string? OperationId { get; init; }
+    public DateTimeOffset? OccurredAt { get; init; }
+    public DateTimeOffset ReceivedAt { get; init; }
+    public string Kind { get; init; } = "";
+    public FactData Data { get; init; } = new();
+    public string? NativeType { get; init; }
+    public string? NativeReason { get; init; }
+    public string? ReportedBasis { get; init; }
+    public string? StreamId { get; init; }
+    public long? SourceSequence { get; init; }
+    public string Origin { get; init; } = "";
+    public bool Historical { get; init; }
+    public string SourceId { get; init; } = "";
+    public bool SequenceGap { get; init; }
+    [JsonIgnore] public string SessionKey => string.Join("\u001f", Agent, SessionNamespace, SessionId);
+    [JsonIgnore] public string LedgerKey => string.Join("\u001f", SourceId, SessionKey);
+}
+public sealed record EvidenceSession(string Agent, string SessionNamespace, string SessionId, string SourceId,
+    string Origin, Fact[] Facts, string Coverage = "complete", string[]? IncompleteOperations = null)
+{
+    [JsonIgnore] public string Key => string.Join("\u001f", SourceId, Agent, SessionNamespace, SessionId);
+}
+public sealed record RuntimeSnapshot(int Schema, string Epoch, long Revision, EvidenceSession[] Sessions, string Coverage = "complete");
 public sealed record RuntimeInfo(string Version, int Schema, string Mode, string Epoch);
-public sealed record SourceStatus(string Id, string Agent, string Health, string? Reason, int? Format);
+public sealed record SourceStatus(string Id, string Agent, string Health, string? Reason, int? Format, string? SessionNamespace = null, string Origin = "file");
 public sealed record Health(Dictionary<string, string> Roots, SourceStatus[] Sources, string Watcher);
-public sealed record RuntimeEvent(long Id, string Type, Session? Session);
 public sealed record Capability
 {
     public string Agent { get; init; } = "";
@@ -50,6 +107,8 @@ public sealed record Capability
     public string TurnEnd { get; init; } = "";
     public string? DesktopCertification { get; init; }
     public string? NoSession { get; init; }
+    public string[] Facts { get; init; } = [];
+    public string[] Limitations { get; init; } = [];
 }
 
 public sealed record Cursor(string Epoch, long Revision)
@@ -66,5 +125,6 @@ public sealed record Cursor(string Epoch, long Revision)
 }
 
 public sealed record SseMessage(string Id, string Type, string Data);
-public sealed record ClientEvent(DateTimeOffset ReceivedAt, string Type, Session? Session, string Summary);
-public sealed record StateView(Session[] Sessions, ClientEvent[] Events, Cursor? Cursor, long Version);
+public sealed record ClientEvent(DateTimeOffset ReceivedAt, string Type, Session? Session, string Summary,
+    Fact? Fact = null, bool IsNotification = false, string? NotificationOutcome = null);
+public sealed record StateView(Session[] Sessions, ClientEvent[] Events, Cursor? Cursor, long Version, string Coverage = "complete");

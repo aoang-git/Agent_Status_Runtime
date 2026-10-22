@@ -1,100 +1,112 @@
 # Agent_Status_Runtime
-跨 Agent 的本机状态监测服务。当前实现为 **v0.1 被动文件监测**：自动发现本地会话，增量解析持久化记录，通过 CLI、HTTP 和 SSE 提供状态。整个过程不修改 Agent 配置。
 
-当前支持：
+跨 Agent 的本机事实采集与广播服务。**v0.2 将采集事实与状态推断分开**：Runtime 增量读取四类工具的持久化记录，或接收用户编写的 Hook／插件上报，保存白名单元信息，通过 HTTP/SSE 广播。Runtime 不安装、加载或执行插件，也不修改 Agent 配置。
 
-| Agent | 文件来源 | 能力边界 |
+| 来源 | 文件格式 | 提供的事实与限制 |
 |---|---|---|
-| Codex CLI / 桌面本地会话 | rollout JSONL | 活动、工具证据、明确回合结束/中断；缺少回合 ID 的结束不通知 |
-| Claude Code CLI / 桌面本地 Code | transcript JSONL | 会话、活动与工具证据；消息结束仅为候选，不发成功通知 |
-| DeepSeek Harness | v3/v4 JSONL、Zstd 帧 | 活动、工具、审批请求推断、明确结束；恢复补写与继承前缀不通知 |
-| Pi coding agent | v3 JSONL | 会话、消息/工具活动、已持久化分支变化；不承诺 session-level 完成 |
+| Codex CLI／桌面本地会话 | rollout JSONL | 会话、消息、工具、明确回合开始／结束；缺少回合 ID 不归属完成 |
+| Claude Code CLI／桌面本地 Code | transcript JSONL | 输入、消息原生停止原因、工具；消息结束不代表整轮成功 |
+| DeepSeek Harness | v3/v4 JSONL、Zstd | 回合边界、工具、审批；恢复补写及继承前缀不当作新完成 |
+| Pi coding agent | v3 JSONL | 输入、消息停止原因、工具、持久化分支变化；不等同于内存中的整轮稳定结束 |
+| 用户自助接入 | 本机 HTTP／通用 CLI | 任意 Agent 名称；外部声明始终保留外部来源，不升级为 Runtime 证实 |
 
-CLI 与桌面共用文件解析器，桌面版本兼容性仍需独立验证。云端、WSL/远程文件、无持久化会话不会因本机客户端存在就自动被覆盖。人工等待普遍无法靠文件确认；`unknown` 表示证据不足，静默不会变成完成。
+CLI／桌面共用文件解析器，桌面兼容性仍需独立验证。云端、WSL／远程文件和无持久化会话不会自动覆盖。完整协议、字段、恢复边界及回滚步骤见 [v0.2 接入协议](doc/v0.2接入协议.md)。
 
-### Windows 启动
+## Windows 运行
 
-已构建程序位于 `bin/agent-statusd.exe`。在项目目录运行：
+在项目目录独立启动 Runtime，另开终端查询：
 
 ```powershell
 .\bin\agent-statusd.exe serve --data-dir .\.runtime\live
-```
-
-另一个终端查询或订阅：
-
-```powershell
 .\bin\agent-statusd.exe status --data-dir .\.runtime\live
 .\bin\agent-statusd.exe doctor --data-dir .\.runtime\live
 .\bin\agent-statusd.exe watch --data-dir .\.runtime\live
-```
-
-前台服务按 Ctrl+C 停止。默认仅监听 `127.0.0.1:9120`，使用当前用户受限目录中的随机令牌。省略 `--data-dir` 时，使用系统用户配置目录下的 `AgentStatusRuntime`。不注册自启动，也不安装 Hooks。
-
-默认寻找 `~/.codex/sessions`、`~/.claude/projects`、`~/.dsh/sessions`、`~/.pi/agent/sessions`，识别 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DSH_HOME`、`PI_CODING_AGENT_SESSION_DIR`。非标准位置可临时传入多个 `--root codex=D:\path\sessions`；传入后只扫描指定根，不修改任何 Agent 文件。未创建的默认目录会由后续补偿扫描发现。
-
-### Windows 测试窗口
-
-双击 `bin/agent-status-test.exe`，或指定 Runtime 数据目录：
-
-```powershell
 .\bin\agent-status-test.exe --data-dir .\.runtime\live
 ```
 
-这是 Windows x64 自包含程序，运行时无需安装 .NET。未指定目录时，优先使用程序旁项目的 `.runtime/live`（存在连接文件时），否则使用当前用户配置目录下的 `AgentStatusRuntime`。窗口可选择其他数据目录，也可手动重新连接。
+`status` 输出事实快照，`watch` 输出事实 SSE；二者不推断工作／空闲。前台服务按 Ctrl+C 停止。默认仅监听 `127.0.0.1:9120`；省略 `--data-dir` 时使用当前用户配置目录中的 `AgentStatusRuntime`。不注册自启动。
 
-窗口只读取真实 HTTP/SSE 数据，**不会启动、停止或配置 Runtime**；请先单独运行服务。关闭窗口不会影响后台监测。会话页支持 Agent、状态筛选及完整身份、工具、审批详情；实时事件页最多保留 500 条，支持清空和暂停滚动；采集诊断页显示根目录、文件通知、来源降级原因及四类 Agent 的能力限制。缺失字段显示“未提供”，推断等待、未知和明确回合完成分别显示。
+默认扫描 `~/.codex/sessions`、`~/.claude/projects`、`~/.dsh/sessions`、`~/.pi/agent/sessions`，识别 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DSH_HOME`、`PI_CODING_AGENT_SESSION_DIR`。非标准位置可传多个 `--root codex=D:\path\sessions`；传入后只扫描指定根。不存在的根目录会在后续补偿扫描中重查。
 
-连接状态栏每秒显示全局最新活动摘要，例如 `已连接 | Codex：工作中...26s`、`已连接 | 无活动：空闲...1m10s`。优先显示有新鲜证据的活动会话；没有活动时参考最近会话，证据不足保留“未知”。计时表示距所显示会话最新证据的时间，不是精确任务耗时，不受列表筛选影响；断线时显示连接错误并保留会话快照。
+## 让自己的 Agent 实现接入
 
-事件页将 `turn.ended` 单独显示为“任务结束通知”，对外状态为任务完成、任务中断、任务失败或结束（结果未知）；其后 `state.changed` 的“空闲”是状态同步，不是第二次完成通知。这里的任务结束指 Agent 明确报告的回合结束。Pi 文件模式中的普通 assistant 消息结束不能确认整轮稳定结束，因此保留未知，说明列区分“尚无整轮稳定结束证据”和“活动证据已过期”。
+```powershell
+# 离线也能生成；输出路径和协议，不包含令牌。
+.\bin\agent-statusd.exe integration-prompt --data-dir .\.runtime\live
 
-连接中断后保留最后快照和接收时间，按 1、2、5、10 秒重试，后续最多间隔 10 秒。每次重连重新读取连接文件，适应服务重启后地址和令牌变化；45 秒无事件或心跳会断开重试。诊断与权威状态每 5 秒核对；SSE 按 `epoch:revision` 恢复，reset 标记事件间隙，历史快照不会生成完成事件。连接仅接受 HTTP loopback IP，禁用代理和自动重定向，令牌不展示、不记录。
+# 一条 UTF-8 JSON 从 stdin 传入；校验时不连接服务。
+Get-Content -Raw .\event.json | .\bin\agent-statusd.exe report --validate-only
+Get-Content -Raw .\event.json | .\bin\agent-statusd.exe report --data-dir .\.runtime\live --best-effort
+```
 
-### 构建与测试
+将生成的提示词交给实际使用的 Agent，让它检查自身版本及官方扩展机制，编写确定性的原生回调转发程序，并交付配置差异、验证和卸载说明。没有可靠生命周期回调时，只能上报 `inferred`／`self_report`，不能伪造原生完成。本仓库不代为安装任何专用插件。
 
-需要 Go 1.26+。构建前停止正在运行的同名程序。Windows 构建脚本优先使用项目内 `.tools/go` 便携工具链，否则使用 PATH 中的 Go：
+通用示例默认保持 stdout 为空，上报失败只输出脱敏错误代码且正常退出；运行时不应启动服务或阻断原工具：
+
+```powershell
+# PowerShell 7：-Mode Http 改为直接调用本机写接口。
+pwsh -File .\examples\report-state.ps1 -DataDir .\.runtime\live -Exe .\bin\agent-statusd.exe -Agent my-agent -Session session-1 -Operation request-1 -State completed -Mode Cli
+
+# Python 标准库：--mode http 改为直接 HTTP。
+python .\examples\report_state.py --data-dir .\.runtime\live --exe .\bin\agent-statusd.exe --agent my-agent --session session-1 --operation request-1 --state completed --mode cli
+```
+
+两个示例只生成 `state.reported / self_report`，不证明某个具体 Agent 生命周期兼容。接入者必须提供真实会话、稳定的本轮执行 ID；独立重试需复用同一 `--event-id`／`-EventId`。先连接专用测试 Runtime 验证，禁止向真实 Agent 日志注入测试记录。
+
+## Windows 测试窗口
+
+`bin/agent-status-test.exe` 是 Windows x64 自包含程序，运行无需另装 .NET。可双击启动；未指定目录时优先使用程序旁项目的 `.runtime/live`（有连接文件时），否则使用用户配置目录。窗口允许选择数据目录和重新连接，**不会启动、停止或配置 Runtime**。
+
+窗口读取 v2 事实并在客户端使用 `default-v1` 规则解释：
+
+- 会话页和顶部摘要显示当前活动、依据、来源、证据新鲜度及待配对工具／审批。
+- 事实页保留最近 500 条接收记录，可清空和暂停滚动；明确结束、普通空闲、推断空闲、外部完成分别显示。
+- 文件中的 Codex／DSH 明确正常结束可产生完成通知；Claude／Pi 正常消息结束且没有未配对工具时只能推断空闲。
+- 外部完成标为“任务完成（外部报告）”。`native_event` 只是外部发送者的依据声明。
+- 历史事实、首次快照和流重置不新增完成提醒。证据不足或来源不可用时保留未知，不由静默伪造完成。
+
+顶部计时是距最新活动证据的时间，不是精确任务耗时；不受列表筛选影响。客户端两分钟后标记未确认活动证据过期，不改写核心事实。其他上位机可以实现自己的解释规则。
+
+断线保留快照和接收时间，按 1、2、5、10 秒重试，后续最多 10 秒；每次重读连接文件。45 秒没有事件／心跳时断开。诊断和事实快照每 5 秒核对，SSE 使用 `epoch:revision` 恢复；重放不足时标明间隙。关闭窗口不影响后台采集。
+
+## 接口、安全与恢复边界
+
+只读发现文件为 `<data-dir>/private/connection.json`，写入发现文件为同目录的 `ingest.json`；均含 `url`／`token`，每次服务启动轮换凭据。令牌不放入 URL，不展示、不记录。
+
+| 接口 | 凭据 |
+|---|---|
+| `GET /v2/info`、`/v2/schema`、`/v2/health`、`/v2/capabilities` | 只读 |
+| `GET /v2/snapshot`、`/v2/events` | 只读 |
+| `POST /v2/ingest` | 写入；只读令牌不可写，写入令牌不可读 |
+
+只接受 HTTP loopback IP；官方客户端／示例禁用代理和自动重定向。HTTP 拒绝带非空 `Origin` 的浏览器请求。v0.2 不保留 `/v1` 状态服务，旧接口返回升级错误，Runtime 与窗口须一起更新。
+
+写入每次一条事件，最多 16 KiB；拒绝未知类型、未知字段、嵌套原始对象及非法元信息。`201` 表示新事件持久化成功，`200` 表示重复并返回原事实 ID，`409` 表示同 ID 不同内容。外部幂等范围为最近 10 万条或七天，以先淘汰者为准；持有写凭据的本机程序可声明任意 producer，首版没有逐插件身份认证。
+
+事实 SSE 保留最近 4096 条；快照保留每个来源会话最近 32 个 operation 的摘要，最多 2048 条配对／边界记录，整个快照最多 8 MiB。超限或序号缺口标为覆盖不完整，`incomplete_operations` 区分旧历史裁剪与当前证据缺失。不能将快照当完整审计日志。原生时间不重排接收顺序，没有来源序号就不能保证发现所有丢失。
+
+JSONL 半行、Zstd 半帧不推进检查点；单行上限 8 MiB，压缩读取 16 MiB，解压帧 32 MiB。未知版本、损坏或超限只降级相应来源，存储失败不推进检查点。数据库只保存白名单事实与检查点，不保存提示词、正文、工具参数或输出。来源漏记、持久化延迟、内存分支及进程崩溃仍会影响观察完整性；不提供离线外部事件队列。
+
+## 构建、测试和升级
+
+Runtime 需要 Go 1.26+，纯 Go SQLite 无需 C 编译器。构建脚本优先使用 `.tools/go` 便携工具链：
 
 ```powershell
 .\scripts\build.ps1 -Test
-```
-
-标准 Go 命令：
-
-```text
-cd runtime
-go test ./...
-go vet ./...
-go build -trimpath -o ../bin/agent-statusd ./cmd/agent-statusd
-```
-
-依赖由 `runtime/go.mod` 与 `go.sum` 锁定。Go 纯代码 SQLite，无需 C 编译器。二进制、构建缓存和本机状态均已加入忽略列表。
-
-测试窗口独立使用 .NET 10 SDK 构建，只需关闭正在运行的测试窗口，无需停止 Runtime：
-
-```powershell
+# 或在 runtime 目录：go test ./...；go vet ./...
 .\scripts\build-test-window.ps1 -Test
-# 只运行窗口测试：
+# 单独运行窗口测试：
 dotnet test .\manager\test-window\Tests\Tests.csproj
 ```
 
-脚本发布单文件 `bin/agent-status-test.exe`，不构建或替换 Runtime 二进制。源码分为 `manager/test-window/App`（WinForms）、`Core`（HTTP/SSE 与状态）、`Tests`（MSTest）。集成测试需要已构建的 `bin/agent-statusd.exe`，会启动独立临时 Runtime 并写入人工构造日志，结束后清理自己的进程与目录，不操作真实 Agent 日志。
+窗口独立使用 .NET 10 SDK 发布，不构建或替换 Runtime。构建前退出将被替换的程序；正式更新前先保留旧二进制，并校验所属进程后停止 Runtime。集成测试使用独立临时 Runtime 和构造日志，不能操作真实 Agent 日志。
 
-### 接口与已知限制
-
-`GET /v1/info`、`/v1/health`、`/v1/status`、`/v1/sessions`、`/v1/capabilities`、`/v1/events` 均需 `Authorization: Bearer <token>`。连接地址与令牌保存在 `<data-dir>/private/connection.json`；CLI 自动读取，不将令牌放进 URL。HTTP 不接收跨源浏览器请求。
-
-状态快照附 `epoch`、`revision`；SSE 的 `Last-Event-ID` 或 `after` 游标为 `epoch:revision`。首次订阅发送 snapshot，重放窗口外发送 reset；最多保留 512 条事件。终止通知为 `turn.ended`，携带 `completed / interrupted / failed / unknown`。只有 `completed` 才表示当前回合明确正常结束。
-
-首次发现、重启恢复和文件重建先静默建立历史快照，因此不会把已有完成记录当成新通知；新发现文件在首次扫描边界内结束的短会话也不会弹完成提醒。运行中的追加记录才产生新的终止通知。活跃证据默认两分钟后过期为 unknown，可通过 `--stale-after` 调整。
-
-文件通知合并触发增量读取，默认每 5 秒补偿发现。JSONL 半行、Zstd 半帧不推进检查点；日志格式损坏、未知版本、压缩编码歧义或超限会在 doctor 中降级。单行上限 8 MiB、压缩帧读取上限 16 MiB、解压上限 32 MiB；遇到超限停在安全游标，不跳过后假装完整。
-
-Runtime 仅读取 Agent 文件，数据库保存白名单状态元信息及检查点，不保存提示词、正文或工具参数。实际持久化延迟、内存分支选择、Agent 崩溃和上游漏记录仍可能使实时状态未知。此版本不提供完整五态认证；Hooks、原生服务自启动和更老格式后续适配。
+v0.2 使用独立的 `private/facts-v2.sqlite`；保留 v0.1 `state.sqlite`，不把旧推断状态导入事实库。首次启动建立历史基线，不重复提醒旧完成。回滚需停止 v0.2，同时恢复旧 Runtime 和旧窗口，使用保留的旧数据库；不要在运行中复制单个 SQLite 文件或让两个版本同时占用同一数据目录。详见 [迁移与回滚](doc/v0.2接入协议.md#迁移与回滚)。
 
 项目文档：
 
-- [第一阶段实现方案](doc/第一阶段实现方案.md)：Codex、Claude Code、DeepSeek Harness、Pi 的接入分析、实施顺序与验收标准。
-- [软件架构设计](doc/agent状态统一监测项目架构.md)
-- [可行性研究](doc/agent状态统一监测计划.md)
-- [v0.1 验证记录](doc/v0.1验证记录.md)
-- [测试窗口验证记录](doc/测试窗口验证记录.md)
+- [v0.2 接入协议与示例](doc/v0.2接入协议.md)
+- [v0.2 验证与交付记录](doc/v0.2验证记录.md)
+- [公共 JSON Schema](runtime/internal/monitor/protocol/schema.json) · [协议样本](runtime/internal/monitor/protocol/samples.json) · [通用接入提示词模板](runtime/internal/monitor/protocol/integration-prompt.md)
+- [第一阶段实现方案](doc/第一阶段实现方案.md) · [软件架构设计](doc/agent状态统一监测项目架构.md) · [可行性研究](doc/agent状态统一监测计划.md)
+- [v0.1 验证记录（历史）](doc/v0.1验证记录.md) · [测试窗口验证记录](doc/测试窗口验证记录.md)

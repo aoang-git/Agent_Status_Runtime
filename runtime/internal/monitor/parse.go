@@ -13,7 +13,7 @@ type object map[string]json.RawMessage
 func obj(b json.RawMessage) object     { var o object; _ = json.Unmarshal(b, &o); return o }
 func str(o object, k string) string    { var s string; _ = json.Unmarshal(o[k], &s); return s }
 func number(o object, k string) int    { var n int; _ = json.Unmarshal(o[k], &n); return n }
-func boolean(o object, k string) bool  { var v bool; _ = json.Unmarshal(o[k], &v); return v }
+func boolean(o object, k string) bool  { var b bool; _ = json.Unmarshal(o[k], &b); return b }
 func array(b json.RawMessage) []object { var a []object; _ = json.Unmarshal(b, &a); return a }
 func stamp(raw json.RawMessage) time.Time {
 	var s string
@@ -27,8 +27,16 @@ func stamp(raw json.RawMessage) time.Time {
 	}
 	return time.Time{}
 }
+func observation(kind, native, op string, t time.Time, data EventData) Fact {
+	f := Fact{InputEvent: InputEvent{Schema: 2, Kind: kind, OperationID: op, NativeType: native, Data: data}}
+	if !t.IsZero() {
+		f.OccurredAt = &t
+	}
+	return f
+}
 
-// Parse only copies whitelisted metadata. Errors never include raw log content.
+// Only metadata leaves this parser. Native message endings remain messages;
+// neither inactivity nor a message ending becomes an Agent state here.
 func parse(src *Source, line []byte) ([]Fact, error) {
 	if !json.Valid(line) {
 		return nil, errors.New("invalid_json")
@@ -37,17 +45,51 @@ func parse(src *Source, line []byte) ([]Fact, error) {
 	if o == nil || str(o, "type") == "" {
 		return nil, errors.New("invalid_record_shape")
 	}
+	before, _ := json.Marshal(src.Session)
+	var facts []Fact
+	var err error
 	switch src.Root.Agent {
 	case "codex":
-		return parseCodex(src, o)
+		facts, err = parseCodex(src, o)
 	case "claude":
-		return parseClaude(src, o)
+		facts, err = parseClaude(src, o)
 	case "pi":
-		return parsePi(src, o)
+		facts, err = parsePi(src, o)
 	case "deepseek":
-		return parseDeepseek(src, o)
+		facts, err = parseDeepseek(src, o)
+	default:
+		err = errors.New("unsupported_agent")
 	}
-	return nil, errors.New("unsupported_agent")
+	if err != nil {
+		return nil, err
+	}
+	after, _ := json.Marshal(src.Session)
+	if src.Session != nil && string(before) != string(after) {
+		t := stamp(o["timestamp"])
+		if t.IsZero() {
+			t = stamp(o["time"])
+		}
+		s := src.Session
+		f := observation("session.observed", str(o, "type"), "", t, EventData{Surface: s.Surface, AgentVersion: s.AgentVersion, ParentSessionID: s.ParentID})
+		facts = append([]Fact{f}, facts...)
+	}
+	for i := range facts {
+		f := &facts[i]
+		if f.Kind == "tool.observed" {
+			if src.Parser.Calls == nil {
+				src.Parser.Calls = map[string]string{}
+			}
+			if f.Data.Phase == "finished" {
+				if op, ok := src.Parser.Calls[f.Data.CallID]; ok {
+					f.OperationID = op
+					delete(src.Parser.Calls, f.Data.CallID)
+				}
+			} else {
+				src.Parser.Calls[f.Data.CallID] = f.OperationID
+			}
+		}
+	}
+	return facts, nil
 }
 
 func parseCodex(src *Source, o object) ([]Fact, error) {
@@ -60,10 +102,9 @@ func parseCodex(src *Source, o object) ([]Fact, error) {
 			id = str(p, "session_id")
 		}
 		surface := "unknown"
-		source, origin := str(p, "source"), str(p, "originator")
-		if strings.Contains(strings.ToLower(origin), "desktop") {
+		if strings.Contains(strings.ToLower(str(p, "originator")), "desktop") {
 			surface = "desktop"
-		} else if source == "cli" || source == "exec" {
+		} else if contains("cli exec", str(p, "source")) {
 			surface = "cli"
 		}
 		parent := str(p, "parent_thread_id")
@@ -73,58 +114,67 @@ func parseCodex(src *Source, o object) ([]Fact, error) {
 		newSession(src, id, surface, str(p, "cli_version"), parent)
 		return nil, nil
 	}
-	f := Fact{At: t, Turn: str(p, "turn_id"), Reason: "codex_" + str(p, "type")}
+	if src.Session == nil {
+		return nil, errors.New("missing_session_header")
+	}
+	native := str(p, "type")
+	op := str(p, "turn_id")
 	if k == "event_msg" {
-		switch str(p, "type") {
+		switch native {
 		case "task_started", "turn_started":
-			f.Kind = "start"
-		case "task_complete", "turn_complete":
-			if f.Turn == "" {
-				f.Kind, f.Reason = "candidate", "unattributed_completion"
-				break
+			src.Parser.Operation = op
+			return []Fact{observation("lifecycle.observed", native, op, t, EventData{Phase: "started", Scope: "agent_turn"})}, nil
+		case "task_complete", "turn_complete", "turn_aborted":
+			outcome := "completed"
+			if native == "turn_aborted" {
+				outcome = "interrupted"
 			}
-			f.Kind, f.Outcome = "end", "completed"
 			if v := p["error"]; len(v) > 0 && string(v) != "null" {
-				f.Outcome = "failed"
+				outcome = "failed"
 			}
-		case "turn_aborted":
-			if f.Turn == "" {
-				f.Kind, f.Reason = "candidate", "unattributed_interruption"
-			} else {
-				f.Kind, f.Outcome = "end", "interrupted"
+			data := EventData{Phase: "ended", Scope: "agent_turn"}
+			if op != "" {
+				data.Outcome = outcome
 			}
+			f := observation("lifecycle.observed", native, op, t, data)
+			f.NativeReason = outcome
+			return []Fact{f}, nil
+		case "user_message":
+			return []Fact{observation("input.observed", native, src.Parser.Operation, t, EventData{})}, nil
+		case "agent_message", "agent_reasoning":
+			return []Fact{observation("message.observed", native, src.Parser.Operation, t, EventData{Role: "assistant"})}, nil
 		case "item_completed":
-			i := obj(p["item"])
-			switch str(i, "type") {
-			case "commandExecution", "command_execution", "mcpToolCall", "mcp_tool_call", "functionCallOutput", "function_call_output":
-				f.Kind, f.Call = "tool_end", str(i, "id")
+			item := obj(p["item"])
+			if contains("commandExecution command_execution mcpToolCall mcp_tool_call functionCallOutput function_call_output", str(item, "type")) {
+				return []Fact{observation("tool.observed", native, op, t, EventData{CallID: str(item, "id"), Phase: "finished"})}, nil
 			}
 		}
 	} else if k == "response_item" {
-		switch str(p, "type") {
+		switch native {
 		case "function_call", "custom_tool_call", "local_shell_call":
-			f.Kind, f.Call, f.Turn = "tool", str(p, "call_id"), ""
+			return []Fact{observation("tool.observed", native, src.Parser.Operation, t, EventData{CallID: str(p, "call_id"), Phase: "requested"})}, nil
 		case "function_call_output", "custom_tool_call_output":
-			f.Kind, f.Call, f.Turn = "tool_end", str(p, "call_id"), ""
+			return []Fact{observation("tool.observed", native, "", t, EventData{CallID: str(p, "call_id"), Phase: "finished"})}, nil
+		case "message":
+			role := str(p, "role")
+			if contains("user assistant system tool", role) {
+				return []Fact{observation("message.observed", native, src.Parser.Operation, t, EventData{Role: role})}, nil
+			}
 		}
 	}
-	return []Fact{f}, nil
+	return nil, nil
 }
 
 func parseClaude(src *Source, o object) ([]Fact, error) {
-	id := str(o, "sessionId")
-	if id != "" {
+	if id := str(o, "sessionId"); id != "" {
 		parent := ""
 		surface := "unknown"
 		name := strings.TrimSuffix(filepath.Base(src.Path), ".jsonl")
 		if strings.HasPrefix(name, "agent-") {
 			parent, id, surface = id, name, "subagent"
 		}
-		switch str(o, "entrypoint") {
-		case "cli":
-			surface = "cli"
-		case "desktop":
-			surface = "desktop"
+		if contains("cli desktop", str(o, "entrypoint")) {
+			surface = str(o, "entrypoint")
 		}
 		if parent != "" {
 			surface = "subagent"
@@ -137,33 +187,39 @@ func parseClaude(src *Source, o object) ([]Fact, error) {
 	t := stamp(o["timestamp"])
 	m := obj(o["message"])
 	facts := []Fact{}
-	switch str(o, "type") {
+	native := str(o, "type")
+	switch native {
 	case "user":
-		toolResults := false
+		results := false
 		for _, c := range array(m["content"]) {
 			if str(c, "type") == "tool_result" {
-				toolResults = true
-				facts = append(facts, Fact{Kind: "tool_end", Call: str(c, "tool_use_id"), At: t, Reason: "claude_tool_result"})
+				results = true
+				outcome := "completed"
+				if boolean(c, "is_error") {
+					outcome = "failed"
+				}
+				facts = append(facts, observation("tool.observed", "tool_result", "", t, EventData{CallID: str(c, "tool_use_id"), Phase: "finished", Outcome: outcome}))
 			}
 		}
-		if !toolResults && !boolean(o, "isMeta") && !boolean(o, "isCompactSummary") && !boolean(o, "isVisibleInTranscriptOnly") {
-			facts = append(facts, Fact{Kind: "start", Turn: str(o, "uuid"), At: t, Reason: "claude_user_message"})
+		if !results && !boolean(o, "isMeta") && !boolean(o, "isCompactSummary") && !boolean(o, "isVisibleInTranscriptOnly") {
+			src.Parser.Operation = str(o, "uuid")
+			facts = append(facts, observation("input.observed", native, src.Parser.Operation, t, EventData{MessageID: str(o, "uuid")}))
 		}
 	case "assistant":
-		if boolean(o, "isApiErrorMessage") {
-			return []Fact{{Kind: "candidate", At: t, Reason: "claude_api_error_message"}}, nil
-		}
+		hasTools := false
 		for _, c := range array(m["content"]) {
 			if str(c, "type") == "tool_use" {
-				facts = append(facts, Fact{Kind: "tool", Call: str(c, "id"), At: t, Reason: "claude_tool_call"})
+				hasTools = true
+				facts = append(facts, observation("tool.observed", "tool_use", src.Parser.Operation, t, EventData{CallID: str(c, "id"), Phase: "requested"}))
 			}
 		}
-		if len(facts) == 0 {
-			facts = append(facts, Fact{Kind: "activity", At: t, Reason: "claude_assistant_message"})
+		data := EventData{Role: "assistant", StopReason: str(m, "stop_reason"), MessageID: str(o, "uuid"), HasTools: &hasTools}
+		if boolean(o, "isApiErrorMessage") {
+			data.Outcome = "failed"
 		}
-		if stop := str(m, "stop_reason"); stop == "end_turn" || stop == "stop_sequence" || stop == "max_tokens" {
-			facts = append(facts, Fact{Kind: "candidate", At: t, Reason: "message_end_without_turn_boundary"})
-		}
+		f := observation("message.observed", native, src.Parser.Operation, t, data)
+		f.NativeReason = data.StopReason
+		facts = append(facts, f)
 	}
 	return facts, nil
 }
@@ -184,7 +240,9 @@ func parsePi(src *Source, o object) ([]Fact, error) {
 	facts := []Fact{}
 	if id := str(o, "id"); id != "" {
 		if parent := str(o, "parentId"); src.Parser.LastNode != "" && parent != src.Parser.LastNode {
-			facts = append(facts, Fact{Kind: "branch", At: t, Reason: "persisted_branch_changed"})
+			changed := true
+			src.Parser.Operation = ""
+			facts = append(facts, observation("session.observed", "persisted_branch_changed", "", t, EventData{MessageID: id, ParentNodeID: parent, BranchChanged: &changed}))
 		}
 		src.Parser.LastNode = id
 	}
@@ -194,19 +252,25 @@ func parsePi(src *Source, o object) ([]Fact, error) {
 	m := obj(o["message"])
 	switch str(m, "role") {
 	case "user":
-		facts = append(facts, Fact{Kind: "start", Turn: str(o, "id"), At: t, Reason: "pi_user_message"})
+		src.Parser.Operation = str(o, "id")
+		facts = append(facts, observation("input.observed", "user", src.Parser.Operation, t, EventData{MessageID: str(o, "id")}))
 	case "toolResult":
-		facts = append(facts, Fact{Kind: "tool_end", Call: str(m, "toolCallId"), At: t, Reason: "pi_tool_result"})
+		outcome := "completed"
+		if boolean(m, "isError") {
+			outcome = "failed"
+		}
+		facts = append(facts, observation("tool.observed", "toolResult", "", t, EventData{CallID: str(m, "toolCallId"), Phase: "finished", Outcome: outcome}))
 	case "assistant":
-		count := len(facts)
+		tools := false
 		for _, c := range array(m["content"]) {
 			if str(c, "type") == "toolCall" {
-				facts = append(facts, Fact{Kind: "tool", Call: str(c, "id"), At: t, Reason: "pi_tool_call"})
+				tools = true
+				facts = append(facts, observation("tool.observed", "toolCall", src.Parser.Operation, t, EventData{CallID: str(c, "id"), Phase: "requested"}))
 			}
 		}
-		if len(facts) == count {
-			facts = append(facts, Fact{Kind: "candidate", At: t, Reason: "message_end_without_settled_event"})
-		}
+		f := observation("message.observed", "assistant", src.Parser.Operation, t, EventData{Role: "assistant", StopReason: str(m, "stopReason"), MessageID: str(o, "id"), ParentNodeID: str(o, "parentId"), HasTools: &tools})
+		f.NativeReason = f.Data.StopReason
+		facts = append(facts, f)
 	}
 	return facts, nil
 }
@@ -240,57 +304,68 @@ func parseDeepseek(src *Source, o object) ([]Fact, error) {
 		return nil, nil
 	}
 	d := obj(o["data"])
-	f := Fact{At: stamp(o["time"]), Turn: str(d, "turn"), Reason: "deepseek_" + k}
-	// Turn identifiers are numeric in some released formats.
-	if f.Turn == "" && len(d["turn"]) > 0 {
-		f.Turn = string(d["turn"])
+	t := stamp(o["time"])
+	op := str(d, "turn")
+	if op == "" && len(d["turn"]) > 0 {
+		op = string(d["turn"])
 	}
 	if k == "turn/start" || k == "turn/end" {
 		var turn int64
-		if json.Unmarshal(d["turn"], &turn) != nil || turn < 0 || f.At.IsZero() {
+		if json.Unmarshal(d["turn"], &turn) != nil || turn < 0 || t.IsZero() {
 			return nil, errors.New("invalid_turn_boundary")
 		}
 	}
+	if op == "" {
+		op = src.Parser.Operation
+	}
 	switch k {
 	case "turn/start":
-		f.Kind = "start"
+		src.Parser.Operation = op
+		return []Fact{observation("lifecycle.observed", k, op, t, EventData{Phase: "started", Scope: "agent_turn"})}, nil
 	case "step/start":
-		f.Kind = "activity"
+		return []Fact{observation("message.observed", k, op, t, EventData{Role: "assistant"})}, nil
 	case "tool/call":
-		f.Kind, f.Call = "tool", str(d, "callId")
+		return []Fact{observation("tool.observed", k, op, t, EventData{CallID: str(d, "callId"), Phase: "requested"})}, nil
 	case "tool/result":
-		// The persisted result is a user message containing tool-result blocks,
-		// not a top-level callId. There may be more than one result block.
 		facts := []Fact{}
-		for _, result := range array(obj(d["message"])["content"]) {
-			if str(result, "type") == "tool-result" {
-				end := f
-				end.Kind, end.Call = "tool_end", str(result, "toolCallId")
-				facts = append(facts, end)
+		for _, r := range array(obj(d["message"])["content"]) {
+			if str(r, "type") == "tool-result" {
+				outcome := "completed"
+				if boolean(r, "isError") {
+					outcome = "failed"
+				}
+				facts = append(facts, observation("tool.observed", k, op, t, EventData{CallID: str(r, "toolCallId"), Phase: "finished", Outcome: outcome}))
 			}
 		}
 		return facts, nil
 	case "approval/asked":
-		f.Kind, f.Call = "approval", str(d, "id")
+		return []Fact{observation("approval.observed", k, op, t, EventData{RequestID: str(d, "id"), Phase: "requested"})}, nil
 	case "approval/decided":
-		f.Kind, f.Call = "approval_end", str(d, "id")
-	case "turn/end":
-		f.Kind, f.Outcome = "end", "unknown"
-		f.Reason = "deepseek_unknown_end_reason"
-		switch reason := str(obj(d["reason"]), "kind"); reason {
-		case "completed":
-			f.Outcome, f.Reason = "completed", "deepseek_completed"
-		case "aborted":
-			f.Outcome, f.Reason = "interrupted", "deepseek_aborted"
-		case "error", "blocked", "max-tokens":
-			f.Outcome, f.Reason = "failed", "deepseek_"+reason
-		case "interrupted":
-			f.Outcome, f.Silent = "interrupted", true
-			f.Reason = "deepseek_recovery_interrupted"
-		case "forked":
-			f.Outcome, f.Silent = "unknown", true
-			f.Reason = "deepseek_forked"
+		decision := "unknown"
+		reason := str(d, "outcome")
+		if strings.HasPrefix(reason, "allowed") {
+			decision = "allowed"
+		} else if strings.HasPrefix(reason, "denied") {
+			decision = "denied"
 		}
+		f := observation("approval.observed", k, op, t, EventData{RequestID: str(d, "id"), Phase: "resolved", Decision: decision})
+		f.NativeReason = reason
+		return []Fact{f}, nil
+	case "turn/end":
+		reason := str(obj(d["reason"]), "kind")
+		outcome := "unknown"
+		switch reason {
+		case "completed":
+			outcome = "completed"
+		case "aborted", "interrupted":
+			outcome = "interrupted"
+		case "error", "blocked", "max-tokens":
+			outcome = "failed"
+		}
+		f := observation("lifecycle.observed", k, op, t, EventData{Phase: "ended", Scope: "agent_turn", Outcome: outcome})
+		f.NativeReason = reason
+		f.Historical = reason == "interrupted" || reason == "forked"
+		return []Fact{f}, nil
 	}
-	return []Fact{f}, nil
+	return nil, nil
 }

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/santhosh-tekuri/jsonschema/v5"
 )
 
 var now = time.Now().UTC().Truncate(time.Millisecond)
@@ -24,6 +26,9 @@ func codex(kind, turn string, n int) string {
 }
 func header(id string) string {
 	return `{"type":"session_meta","payload":{"id":"` + id + `","originator":"Codex Desktop","cli_version":"sample","source":"cli"}}` + "\n"
+}
+func dsh(kind, data string, seq int) string {
+	return fmt.Sprintf("{\"type\":%q,\"seq\":%d,\"time\":%q,\"data\":%s}\n", kind, seq, ts(seq), data)
 }
 func write(t *testing.T, path, s string) {
 	t.Helper()
@@ -48,16 +53,17 @@ func appendFile(t *testing.T, path string, b []byte) {
 func fixtureEngine(t *testing.T, agent string) (*Engine, string, string) {
 	t.Helper()
 	root := t.TempDir()
-	db := filepath.Join(t.TempDir(), "state.sqlite")
+	db := filepath.Join(t.TempDir(), "facts.sqlite")
 	s, err := OpenStore(db)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	e, err := NewEngine(s, []Root{{agent, root}}, time.Minute)
+	e, err := NewEngine(s, []Root{{agent, root}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	now = time.Now().UTC()
 	return e, root, db
 }
 func scan(t *testing.T, e *Engine) {
@@ -66,452 +72,518 @@ func scan(t *testing.T, e *Engine) {
 		t.Fatal(err)
 	}
 }
-func one(t *testing.T, e *Engine) *Session {
+func all(t *testing.T, e *Engine) []Fact {
 	t.Helper()
-	s, err := e.Snapshot()
+	f, _, err := e.Store.Events(0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(s.Sessions) != 1 {
-		t.Fatalf("want one session, got %d", len(s.Sessions))
-	}
-	return s.Sessions[0]
+	return f
 }
-func ended(t *testing.T, e *Engine) []Event {
-	t.Helper()
-	events, _, err := e.Store.Events(0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result := []Event{}
-	for _, v := range events {
-		if v.Type == "turn.ended" {
-			result = append(result, v)
+func liveEnds(t *testing.T, e *Engine) []Fact {
+	result := []Fact{}
+	for _, f := range all(t, e) {
+		if f.Kind == "lifecycle.observed" && f.Data.Phase == "ended" && !f.Historical {
+			result = append(result, f)
 		}
 	}
 	return result
 }
-
-func TestIncrementalPartialRestartAndHistoricalSilence(t *testing.T) {
-	e, root, db := fixtureEngine(t, "codex")
-	path := filepath.Join(root, "rollout.jsonl")
-	write(t, path, header("one")+codex("task_started", "old", 0)+codex("task_complete", "old", 1))
-	scan(t, e)
-	if one(t, e).State != "idle" || len(ended(t, e)) != 0 {
-		t.Fatal("historical completion notified")
+func input(id string) InputEvent {
+	return InputEvent{Schema: 2, ProducerID: "adapter", EventID: id, Agent: "new-agent", Namespace: "local", SessionID: "s", OperationID: "op", Kind: "state.reported", ReportedBasis: "native_event", Data: EventData{State: "completed"}}
+}
+func frame(t *testing.T, s string) []byte {
+	t.Helper()
+	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderCRC(true))
+	if err != nil {
+		t.Fatal(err)
 	}
-	appendFile(t, path, []byte(codex("task_started", "new", 2)))
+	defer encoder.Close()
+	return encoder.EncodeAll([]byte(s), nil)
+}
+
+func TestProtocolSchemaAndReceiverShareFixtures(t *testing.T) {
+	compiler := jsonschema.NewCompiler()
+	compiler.AssertFormat = true
+	if err := compiler.AddResource("schema.json", bytes.NewReader(SchemaJSON())); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile("schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixtures struct {
+		Valid, Invalid []struct {
+			Name  string
+			Event json.RawMessage
+		}
+	}
+	if err = json.Unmarshal(ProtocolSamples(), &fixtures); err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range []struct {
+		cases []struct {
+			Name  string
+			Event json.RawMessage
+		}
+		valid bool
+	}{{fixtures.Valid, true}, {fixtures.Invalid, false}} {
+		for _, sample := range group.cases {
+			t.Run(sample.Name, func(t *testing.T) {
+				var v any
+				_ = json.Unmarshal(sample.Event, &v)
+				_, err := DecodeInput(sample.Event)
+				if (err == nil) != group.valid {
+					t.Fatalf("receiver: %v", err)
+				}
+				if err = schema.Validate(v); (err == nil) != group.valid {
+					t.Fatalf("schema: %v", err)
+				}
+			})
+		}
+	}
+	for _, bad := range []string{`{"schema":2,"schema":1}`, `{"Schema":2}`, `[]`, `{} {}`, `{"kind":null}`} {
+		if _, err := DecodeInput([]byte(bad)); err == nil {
+			t.Fatal("invalid JSON accepted")
+		}
+	}
+	if _, err := DecodeInput([]byte(strings.Repeat("x", MaxInput+1))); err == nil {
+		t.Fatal("unbounded body")
+	}
+}
+
+func TestPublishedOutputAndInterpretationSamplesConformToSchema(t *testing.T) {
+	c := jsonschema.NewCompiler()
+	c.AssertFormat = true
+	if err := c.AddResource("schema.json", bytes.NewReader(SchemaJSON())); err != nil {
+		t.Fatal(err)
+	}
+	factSchema, err := c.Compile("schema.json#/$defs/fact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotSchema, err := c.Compile("schema.json#/$defs/snapshot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, root, _ := fixtureEngine(t, "codex")
+	write(t, filepath.Join(root, "x.jsonl"), header("one")+codex("task_started", "op", 0))
+	scan(t, e)
+	if _, _, err = e.Store.Ingest(context.Background(), input("external")); err != nil {
+		t.Fatal(err)
+	}
+	validate := func(schema *jsonschema.Schema, value any) {
+		b, _ := json.Marshal(value)
+		var v any
+		_ = json.Unmarshal(b, &v)
+		if err := schema.Validate(v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range all(t, e) {
+		validate(factSchema, f)
+	}
+	snapshot, _ := e.Snapshot()
+	validate(snapshotSchema, snapshot)
+	b, _ := protocolFiles.ReadFile("protocol/interpretation.json")
+	var cases struct{ Cases []struct{ Facts []Fact } }
+	if json.Unmarshal(b, &cases) != nil {
+		t.Fatal("invalid public rule samples")
+	}
+	for _, sample := range cases.Cases {
+		for _, f := range sample.Facts {
+			validate(factSchema, f)
+		}
+	}
+}
+
+func TestIncrementalPartialRestartAndHistoricalFacts(t *testing.T) {
+	e, root, db := fixtureEngine(t, "codex")
+	p := filepath.Join(root, "rollout.jsonl")
+	write(t, p, header("one")+codex("task_started", "old", 0)+codex("task_complete", "old", 1))
+	scan(t, e)
+	if len(all(t, e)) != 3 || len(liveEnds(t, e)) != 0 {
+		t.Fatal("historical facts missing or notified")
+	}
+	appendFile(t, p, []byte(codex("task_started", "new", 2)))
 	scan(t, e)
 	line := codex("task_complete", "new", 3)
-	appendFile(t, path, []byte(line[:len(line)-2]))
+	appendFile(t, p, []byte(line[:len(line)-2]))
 	scan(t, e)
-	if one(t, e).State != "working" {
-		t.Fatal("partial line changed state")
+	if len(liveEnds(t, e)) != 0 {
+		t.Fatal("partial line published")
 	}
-	appendFile(t, path, []byte(line[len(line)-2:]))
+	appendFile(t, p, []byte(line[len(line)-2:]))
 	scan(t, e)
 	scan(t, e)
-	if len(ended(t, e)) != 1 || one(t, e).Outcome != "completed" {
-		t.Fatal("live completion not exactly once")
+	if len(liveEnds(t, e)) != 1 {
+		t.Fatal("completion not exactly once")
 	}
-	appendFile(t, path, []byte(codex("task_started", "offline", 4)+codex("task_complete", "offline", 5)))
+	appendFile(t, p, []byte(codex("task_started", "offline", 4)+codex("task_complete", "offline", 5)))
 	e.Store.Close()
 	s, err := OpenStore(db)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	restarted, err := NewEngine(s, e.Roots, time.Minute)
+	restarted, err := NewEngine(s, e.Roots)
 	if err != nil {
 		t.Fatal(err)
 	}
 	scan(t, restarted)
-	if len(ended(t, restarted)) != 1 || one(t, restarted).TurnID != "offline" {
-		t.Fatal("restart replayed recovered completion")
+	if len(liveEnds(t, restarted)) != 1 {
+		t.Fatal("offline historical completion notified")
+	}
+	snapshot, _ := s.Snapshot()
+	b, _ := json.Marshal(snapshot)
+	if bytes.Contains(b, []byte(`"state":"idle"`)) || bytes.Contains(b, []byte(`"confidence"`)) {
+		t.Fatal("core inferred Agent state")
+	}
+	before := len(all(t, restarted))
+	scan(t, restarted)
+	if len(all(t, restarted)) != before {
+		t.Fatal("silence fabricated a state change")
 	}
 }
 
-func TestOldTurnCannotEndNewTurnAndTerminalErrors(t *testing.T) {
+func TestNativeOldUnattributedAndFailedEndsRemainFacts(t *testing.T) {
 	e, root, _ := fixtureEngine(t, "codex")
-	p := filepath.Join(root, "one.jsonl")
+	p := filepath.Join(root, "x.jsonl")
 	write(t, p, header("one")+codex("task_started", "a", 0))
 	scan(t, e)
-	appendFile(t, p, []byte(codex("task_started", "b", 1)+codex("task_complete", "a", 2)))
+	appendFile(t, p, []byte(codex("task_started", "b", 1)+codex("task_complete", "a", 2)+codex("task_complete", "", 3)))
 	scan(t, e)
-	if one(t, e).TurnID != "b" || one(t, e).State != "working" || len(ended(t, e)) != 0 {
-		t.Fatal("old terminal closed current turn")
+	ends := liveEnds(t, e)
+	if len(ends) != 2 || ends[0].OperationID != "a" || ends[1].OperationID != "" || ends[1].Data.Outcome != "" || ends[1].NativeReason != "completed" {
+		t.Fatal("native boundary metadata lost")
 	}
-	appendFile(t, p, []byte(codex("task_complete", "", 2)))
+	appendFile(t, p, []byte(`{"type":"event_msg","timestamp":"`+ts(4)+`","payload":{"type":"task_complete","turn_id":"b","error":{"message":"SECRET_CONTENT"}}}`+"\n"))
 	scan(t, e)
-	if len(ended(t, e)) != 0 || one(t, e).State != "unknown" {
-		t.Fatal("unattributed completion ended current turn")
+	ends = liveEnds(t, e)
+	if ends[len(ends)-1].Data.Outcome != "failed" {
+		t.Fatal("error treated as completion")
 	}
-	line := `{"type":"event_msg","timestamp":"` + ts(3) + `","payload":{"type":"task_complete","turn_id":"b","error":{"message":"DO_NOT_STORE_THIS"}}}` + "\n"
-	appendFile(t, p, []byte(line))
-	scan(t, e)
-	if one(t, e).Outcome != "failed" || len(ended(t, e)) != 1 {
-		t.Fatal("terminal error misclassified")
-	}
-	rows, err := e.Store.db.Query(`SELECT data FROM sources UNION ALL SELECT data FROM events`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var b []byte
-		rows.Scan(&b)
-		if bytes.Contains(b, []byte("DO_NOT_STORE_THIS")) {
-			t.Fatal("content leaked into storage")
-		}
+	b, _ := json.Marshal(all(t, e))
+	if bytes.Contains(b, []byte("SECRET_CONTENT")) {
+		t.Fatal("body leaked")
 	}
 }
 
-func TestDeepseekSeedCutAndNestedToolResult(t *testing.T) {
-	e, root, _ := fixtureEngine(t, "deepseek")
-	p := filepath.Join(root, "session.v3.jsonl")
-	h := `{"type":"session","version":3,"id":"child","isSeeded":true}` + "\n"
-	seed := dsh("session/end-seed", `{"inherited":true}`, 0) + dsh("turn/start", `{"turn":5}`, 1) + dsh("turn/end", `{"turn":5,"reason":{"kind":"completed"}}`, 2) + dsh("session/end-seed", `{"inherited":true}`, 3)
-	write(t, p, h+seed)
-	scan(t, e)
-	if one(t, e).TurnID != "" || len(ended(t, e)) != 0 {
-		t.Fatal("inherited events became child activity")
-	}
-	appendFile(t, p, []byte(dsh("turn/start", `{"turn":6}`, 4)+dsh("tool/call", `{"turn":6,"callId":"c"}`, 5)))
-	scan(t, e)
-	if len(one(t, e).Tools) != 1 {
-		t.Fatal("missing tool call")
-	}
-	appendFile(t, p, []byte(dsh("tool/result", `{"turn":6,"message":{"role":"user","content":[{"type":"tool-result","toolCallId":"c","isError":true}]}}`, 6)))
-	scan(t, e)
-	if len(one(t, e).Tools) != 0 || one(t, e).State != "working" {
-		t.Fatal("nested tool result was not associated")
-	}
-	appendFile(t, p, []byte(dsh("turn/end", `{"turn":6,"reason":{"kind":"completed"}}`, 7)))
-	scan(t, e)
-	if len(ended(t, e)) != 1 {
-		t.Fatal("child completion not emitted after seed cut")
-	}
-}
-
-func TestClaudeSyntheticInputDoesNotClearToolState(t *testing.T) {
-	e, root, _ := fixtureEngine(t, "claude")
-	p := filepath.Join(root, "one.jsonl")
-	write(t, p, `{"type":"user","sessionId":"one","uuid":"u","timestamp":"`+ts(0)+`","message":{"content":"user"}}`+"\n"+`{"type":"assistant","sessionId":"one","timestamp":"`+ts(1)+`","message":{"content":[{"type":"tool_use","id":"c"}]}}`+"\n")
-	scan(t, e)
-	appendFile(t, p, []byte(`{"type":"user","sessionId":"one","isCompactSummary":true,"uuid":"summary","timestamp":"`+ts(2)+`","message":{"content":"synthetic"}}`+"\n"))
-	scan(t, e)
-	if one(t, e).TurnID != "u" || len(one(t, e).Tools) != 1 {
-		t.Fatal("synthetic input became user turn")
-	}
-}
-
-func TestCheckpointAndEventRollbackTogether(t *testing.T) {
+func TestNewLiveFileAndInvalidNativeMetadata(t *testing.T) {
 	e, root, _ := fixtureEngine(t, "codex")
-	p := filepath.Join(root, "one.jsonl")
-	write(t, p, header("one")+codex("task_started", "a", 0))
 	scan(t, e)
-	if _, err := e.Store.db.Exec(`CREATE TRIGGER fail_events BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'fixture'); END`); err != nil {
-		t.Fatal(err)
-	}
-	appendFile(t, p, []byte(codex("task_complete", "a", 1)))
-	if e.Scan() == nil {
-		t.Fatal("expected commit failure")
-	}
-	if one(t, e).State != "working" || len(ended(t, e)) != 0 {
-		t.Fatal("failed transaction advanced memory or events")
-	}
-	if _, err := e.Store.db.Exec(`DROP TRIGGER fail_events`); err != nil {
-		t.Fatal(err)
-	}
+	p := filepath.Join(root, "short.jsonl")
+	write(t, p, header("short")+codex("task_started", "one", 0)+codex("task_complete", "one", 1))
 	scan(t, e)
-	if len(ended(t, e)) != 1 {
-		t.Fatal("rolled-back record was lost")
+	if len(liveEnds(t, e)) != 1 {
+		t.Fatal("short post-start task was hidden as history")
 	}
-}
-
-func TestParserRevisionRebuildsCheckpointSilently(t *testing.T) {
-	e, root, _ := fixtureEngine(t, "deepseek")
-	p := filepath.Join(root, "session.v3.jsonl")
-	write(t, p, `{"type":"session","version":3,"id":"one","isSeeded":false}`+"\n"+dsh("turn/start", `{"turn":0}`, 0))
+	write(t, filepath.Join(root, "oversized.jsonl"), header(strings.Repeat("x", 257)))
 	scan(t, e)
+	found := false
 	for _, src := range e.sources {
-		src.ParserRevision = 0
-		src.Parser.NextSeq = 0
-		if err := e.Store.Commit(src, nil); err != nil {
-			t.Fatal(err)
+		if src.Reason == "invalid_native_metadata" {
+			found = true
+			if src.Offset != 0 {
+				t.Fatal("invalid metadata advanced checkpoint")
+			}
 		}
 	}
-	appendFile(t, p, []byte(dsh("turn/end", `{"turn":0,"reason":{"kind":"completed"}}`, 1)))
-	scan(t, e)
-	if one(t, e).SourceHealth != "healthy" || len(ended(t, e)) != 0 {
-		t.Fatal("parser upgrade failed to rebase silently")
-	}
-	appendFile(t, p, []byte(dsh("turn/start", `{"turn":1}`, 2)+dsh("turn/end", `{"turn":1,"reason":{"kind":"completed"}}`, 3)))
-	scan(t, e)
-	if len(ended(t, e)) != 1 {
-		t.Fatal("new parser did not resume live tail")
+	if !found {
+		t.Fatal("invalid native metadata not degraded")
 	}
 }
 
-func TestRebuildAndCorruptionIsolation(t *testing.T) {
-	e, root, _ := fixtureEngine(t, "codex")
-	p := filepath.Join(root, "one.jsonl")
-	write(t, p, header("one")+codex("task_started", "a", 0))
-	scan(t, e)
-	write(t, p, header("one")+codex("task_started", "b", 1)+codex("task_complete", "b", 2))
-	scan(t, e)
-	if one(t, e).Outcome != "completed" || len(ended(t, e)) != 0 {
-		t.Fatal("rewrite emitted history")
-	}
-	appendFile(t, p, []byte("not-json\n"))
-	scan(t, e)
-	if one(t, e).SourceHealth != "degraded" || one(t, e).State != "unknown" {
-		t.Fatal("invalid source not degraded")
-	}
-	write(t, filepath.Join(root, "two.jsonl"), header("two")+codex("task_started", "c", 3))
-	scan(t, e)
-	s, _ := e.Snapshot()
-	if len(s.Sessions) != 2 {
-		t.Fatal("bad source blocked discovery")
-	}
-}
-
-func frame(t *testing.T, s string) []byte {
-	t.Helper()
-	enc, err := zstd.NewWriter(nil, zstd.WithEncoderCRC(true))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer enc.Close()
-	return enc.EncodeAll([]byte(s), nil)
-}
-func dsh(kind, data string, n int) string {
-	return `{"type":"` + kind + `","seq":` + jsonNumber(n) + `,"time":` + jsonNumber64(now.UnixMilli()+int64(n)) + `,"data":` + data + "}\n"
-}
-func jsonNumber(n int) string     { b, _ := json.Marshal(n); return string(b) }
-func jsonNumber64(n int64) string { b, _ := json.Marshal(n); return string(b) }
-
-func TestDeepseekFramesApprovalAndRecovery(t *testing.T) {
-	e, root, _ := fixtureEngine(t, "deepseek")
-	p := filepath.Join(root, "project", "session", "session.v3.jsonl.zstd")
-	h := `{"type":"session","version":3,"id":"dsh","isSeeded":false}` + "\n"
-	write(t, p, "")
-	appendFile(t, p, frame(t, h))
-	scan(t, e)
-	b := frame(t, dsh("turn/start", `{"turn":0}`, 0)+dsh("approval/asked", `{"id":"a","callId":"c"}`, 1)+dsh("approval/decided", `{"id":"a","outcome":"allowed-once"}`, 2))
-	appendFile(t, p, b[:len(b)-1])
-	scan(t, e)
-	if one(t, e).TurnID != "" {
-		t.Fatal("partial frame was committed")
-	}
-	appendFile(t, p, b[len(b)-1:])
-	scan(t, e)
-	if one(t, e).State != "working" || len(one(t, e).Approvals) != 0 {
-		t.Fatal("automatic approval remained pending")
-	}
-	appendFile(t, p, frame(t, dsh("turn/end", `{"turn":0,"reason":{"kind":"interrupted"}}`, 3)))
-	scan(t, e)
-	if one(t, e).Outcome != "interrupted" || len(ended(t, e)) != 0 {
-		t.Fatal("recovery closer emitted live notification")
-	}
-	appendFile(t, p, frame(t, dsh("turn/start", `{"turn":1}`, 4)+dsh("turn/end", `{"turn":1,"reason":{"kind":"blocked"}}`, 5)))
-	scan(t, e)
-	if one(t, e).Outcome != "failed" || len(ended(t, e)) != 1 {
-		t.Fatal("blocked turn must end as failure")
-	}
-	bad := frame(t, dsh("turn/start", `{"turn":2}`, 6))
-	bad[len(bad)-1] ^= 0xff
-	appendFile(t, p, bad)
-	scan(t, e)
-	if one(t, e).SourceHealth != "degraded" || one(t, e).TurnID != "1" {
-		t.Fatal("bad checksum advanced parser")
-	}
-}
-
-func TestDeepseekNewestUnknownGenerationAndAmbiguousEncoding(t *testing.T) {
-	e, root, _ := fixtureEngine(t, "deepseek")
-	dir := filepath.Join(root, "project", "id")
-	write(t, filepath.Join(dir, "session.v3.jsonl"), `{"type":"session","version":3,"id":"one"}`+"\n")
-	write(t, filepath.Join(dir, "session.v9.jsonl"), `{"type":"session","version":9,"id":"one"}`+"\n")
-	scan(t, e)
-	if len(e.sources) != 1 {
-		t.Fatal("read an obsolete generation")
-	}
-	for _, s := range e.sources {
-		if s.Health != "degraded" || s.Reason != "unsupported_deepseek_format" {
-			t.Fatalf("unexpected source: %+v", s)
-		}
-	}
-	write(t, filepath.Join(dir, "session.v9.jsonl.zstd"), "")
-	scan(t, e)
-	for _, s := range e.sources {
-		if s.Health != "degraded" && s.Health != "unavailable" {
-			t.Fatal("ambiguous encoding accepted")
-		}
-	}
-}
-
-func TestClaudeAndPiDoNotInventCompletion(t *testing.T) {
+func TestClaudePiRetainStopReasonsWithoutInventingRunEnd(t *testing.T) {
 	for _, agent := range []string{"claude", "pi"} {
 		t.Run(agent, func(t *testing.T) {
 			e, root, _ := fixtureEngine(t, agent)
-			p := filepath.Join(root, "session.jsonl")
+			p := filepath.Join(root, "s.jsonl")
 			if agent == "claude" {
-				write(t, p, `{"type":"user","sessionId":"one","entrypoint":"cli","version":"sample","uuid":"u","timestamp":"`+ts(0)+`","message":{"role":"user","content":"SECRET_PROMPT"}}`+"\n")
-				scan(t, e)
-				appendFile(t, p, []byte(`{"type":"assistant","sessionId":"one","timestamp":"`+ts(1)+`","message":{"role":"assistant","stop_reason":"end_turn","content":[]}}`+"\n"))
+				write(t, p, `{"type":"user","sessionId":"one","uuid":"u","message":{"content":"SECRET_PROMPT"}}`+"\n")
 			} else {
-				write(t, p, `{"type":"session","version":3,"id":"one"}`+"\n"+`{"type":"message","id":"u","parentId":null,"timestamp":"`+ts(0)+`","message":{"role":"user","content":"SECRET_PROMPT"}}`+"\n")
-				scan(t, e)
-				appendFile(t, p, []byte(`{"type":"message","id":"a","parentId":"u","timestamp":"`+ts(1)+`","message":{"role":"assistant","stopReason":"stop","content":[]}}`+"\n"))
+				write(t, p, `{"type":"session","version":3,"id":"one"}`+"\n"+`{"type":"message","id":"u","parentId":null,"message":{"role":"user","content":"SECRET_PROMPT"}}`+"\n")
 			}
 			scan(t, e)
-			if len(ended(t, e)) != 0 || one(t, e).State != "unknown" {
-				t.Fatal("message ending promoted to completion")
+			if agent == "claude" {
+				appendFile(t, p, []byte(`{"type":"assistant","sessionId":"one","uuid":"a","message":{"role":"assistant","stop_reason":"end_turn","content":[]}}`+"\n"))
+			} else {
+				appendFile(t, p, []byte(`{"type":"message","id":"a","parentId":"u","message":{"role":"assistant","stopReason":"stop","content":[]}}`+"\n"))
 			}
-			if agent == "claude" && (one(t, e).Surface != "cli" || one(t, e).AgentVersion != "sample") {
-				t.Fatal("sparse transcript erased identity metadata")
+			scan(t, e)
+			facts := all(t, e)
+			f := facts[len(facts)-1]
+			if f.Kind != "message.observed" || f.Data.StopReason == "" || len(liveEnds(t, e)) != 0 {
+				t.Fatal("message boundary lost or upgraded")
+			}
+			b, _ := json.Marshal(facts)
+			if bytes.Contains(b, []byte("SECRET_PROMPT")) {
+				t.Fatal("prompt leaked")
 			}
 		})
 	}
 }
 
-func TestReducerConcurrentCallsAndLateTerminals(t *testing.T) {
-	s := &Session{}
-	apply(s, Fact{Kind: "start", Turn: "a", At: now})
-	apply(s, Fact{Kind: "tool", Call: "one", At: now})
-	apply(s, Fact{Kind: "tool", Call: "two", At: now})
-	apply(s, Fact{Kind: "tool_end", Call: "one", At: now})
-	if s.State != "tool_activity" || len(s.Tools) != 1 {
-		t.Fatal("parallel call was cleared")
+func TestDeepseekFrameBatchSeedApprovalAndRecovery(t *testing.T) {
+	e, root, _ := fixtureEngine(t, "deepseek")
+	p := filepath.Join(root, "session.v3.jsonl.zstd")
+	write(t, p, "")
+	appendFile(t, p, frame(t, `{"type":"session","version":3,"id":"one","isSeeded":true}`+"\n"+dsh("turn/start", `{"turn":5}`, 0)+dsh("turn/end", `{"turn":5,"reason":{"kind":"completed"}}`, 1)+dsh("session/end-seed", `{"inherited":true}`, 2)))
+	scan(t, e)
+	if len(all(t, e)) != 1 {
+		t.Fatal("inherited facts attributed to child")
 	}
-	apply(s, Fact{Kind: "end", Turn: "a", Outcome: "completed", At: now})
-	apply(s, Fact{Kind: "start", Turn: "a", At: now})
-	if s.State != "idle" {
-		t.Fatal("duplicate start reopened a completed turn")
+	b := frame(t, dsh("turn/start", `{"turn":6}`, 3)+dsh("tool/call", `{"callId":"c"}`, 4)+dsh("approval/asked", `{"id":"r"}`, 5)+dsh("approval/decided", `{"id":"r","outcome":"allowed-once"}`, 6)+dsh("tool/result", `{"message":{"content":[{"type":"tool-result","toolCallId":"c","isError":true}]}}`, 7)+dsh("turn/end", `{"turn":6,"reason":{"kind":"completed"}}`, 8))
+	appendFile(t, p, b[:len(b)-1])
+	scan(t, e)
+	if len(all(t, e)) != 1 {
+		t.Fatal("partial frame committed")
 	}
-}
-
-func TestLeaseAndAuthentication(t *testing.T) {
-	db := filepath.Join(t.TempDir(), "state.sqlite")
-	release, err := AcquireLease(db)
-	if err != nil {
-		t.Fatal(err)
+	appendFile(t, p, b[len(b)-1:])
+	scan(t, e)
+	facts := all(t, e)
+	if len(facts) != 7 || facts[2].Kind != "tool.observed" || facts[3].Data.Phase != "requested" || facts[4].Data.Phase != "resolved" || facts[5].Data.Outcome != "failed" || len(liveEnds(t, e)) != 1 {
+		t.Fatal("batch facts collapsed", facts)
 	}
-	if release2, err := AcquireLease(db); err == nil {
-		release2()
-		t.Fatal("second writer allowed")
-	}
-	release()
-	release, err = AcquireLease(db)
-	if err != nil {
-		t.Fatal(err)
-	}
-	release()
-	e, _, _ := fixtureEngine(t, "codex")
-	server := httptest.NewServer(Handler(e, "token"))
-	defer server.Close()
-	resp, err := http.Get(server.URL + "/v1/status")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 401 {
-		t.Fatal("unauthenticated access allowed")
-	}
-	req, _ := http.NewRequest("GET", server.URL+"/v1/status", nil)
-	req.Header.Set("Authorization", "Bearer token")
-	resp, err = http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatal("authenticated request failed")
+	appendFile(t, p, frame(t, dsh("turn/end", `{"turn":6,"reason":{"kind":"interrupted"}}`, 9)))
+	scan(t, e)
+	if len(liveEnds(t, e)) != 1 {
+		t.Fatal("recovery ending notified")
 	}
 }
 
-func TestSSESnapshotReplayAndReset(t *testing.T) {
+func TestRollbackRebuildCorruptionAndGenerationIsolation(t *testing.T) {
 	e, root, _ := fixtureEngine(t, "codex")
-	p := filepath.Join(root, "one.jsonl")
-	write(t, p, header("one")+codex("task_started", "a", 0))
+	p := filepath.Join(root, "x.jsonl")
+	write(t, p, header("one"))
 	scan(t, e)
-	snap, _ := e.Snapshot()
-	appendFile(t, p, []byte(codex("task_complete", "a", 1)))
+	var prior int64
+	for _, src := range e.sources {
+		prior = src.Offset
+	}
+	_, err := e.Store.db.Exec(`CREATE TRIGGER fail_facts BEFORE INSERT ON facts BEGIN SELECT RAISE(ABORT,'fixture'); END`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendFile(t, p, []byte(codex("task_started", "new", 0)))
+	if e.Scan() == nil {
+		t.Fatal("storage failure hidden")
+	}
+	for _, src := range e.sources {
+		if src.Offset != prior {
+			t.Fatal("failed commit advanced memory")
+		}
+	}
+	_, _ = e.Store.db.Exec(`DROP TRIGGER fail_facts`)
 	scan(t, e)
-	server := httptest.NewServer(Handler(e, "token"))
-	defer server.Close()
-	for _, test := range []struct{ cursor, want string }{{"", "snapshot"}, {snap.Epoch + ":" + jsonNumber64(snap.Revision), "turn.ended"}, {"wrong:0", "reset"}} {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		req, _ := http.NewRequestWithContext(ctx, "GET", server.URL+"/v1/events", nil)
-		req.Header.Set("Authorization", "Bearer token")
-		req.Header.Set("Last-Event-ID", test.cursor)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			cancel()
+	write(t, p, header("new")+codex("task_started", "b", 0)+codex("task_complete", "b", 1))
+	write(t, filepath.Join(root, "bad.jsonl"), "{broken}\n")
+	scan(t, e)
+	if len(liveEnds(t, e)) != 0 {
+		t.Fatal("replacement history notified")
+	}
+	snapshot, _ := e.Snapshot()
+	if len(snapshot.Sessions) != 1 || snapshot.Sessions[0].SessionID != "new" {
+		t.Fatal("replacement left ghost evidence")
+	}
+	d, dir, _ := fixtureEngine(t, "deepseek")
+	write(t, filepath.Join(dir, "session.v3.jsonl"), `{"type":"session","version":3,"id":"d"}`+"\n")
+	scan(t, d)
+	write(t, filepath.Join(dir, "session.v4.jsonl"), `{"type":"session","version":4,"id":"d"}`+"\n")
+	scan(t, d)
+	for _, src := range d.sources {
+		if src.Generation == 3 && src.Health != "superseded" {
+			t.Fatal("old generation not marked")
+		}
+	}
+	write(t, filepath.Join(dir, "session.v4.jsonl.zstd"), string(frame(t, `{"type":"session","version":4,"id":"d"}`+"\n")))
+	scan(t, d)
+	found := false
+	for _, src := range d.sources {
+		if src.Reason == "ambiguous_encoding" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("ambiguous encoding hidden")
+	}
+}
+
+func TestExternalIdempotencyProvenanceSequenceAndSnapshotBound(t *testing.T) {
+	e, _, _ := fixtureEngine(t, "codex")
+	f := input("same")
+	id, dup, err := e.Store.Ingest(context.Background(), f)
+	if err != nil || dup {
+		t.Fatal(err)
+	}
+	second, dup, err := e.Store.Ingest(context.Background(), f)
+	if err != nil || !dup || second != id {
+		t.Fatal("idempotency failed")
+	}
+	f.Data.State = "failed"
+	if _, _, err = e.Store.Ingest(context.Background(), f); err != ErrConflict {
+		t.Fatal("conflict accepted")
+	}
+	f = input("sequence-1")
+	seq := int64(1)
+	f.SourceSequence = &seq
+	f.StreamID = "stream"
+	if _, _, err = e.Store.Ingest(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	f.EventID = "sequence-3"
+	seq = 3
+	if _, _, err = e.Store.Ingest(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := e.Snapshot()
+	if snapshot.Coverage != "partial" {
+		t.Fatal("sequence gap hidden")
+	}
+	facts := all(t, e)
+	last := facts[len(facts)-1]
+	if last.Origin != "external" || last.ReportedBasis != "native_event" || !last.SequenceGap {
+		t.Fatal("external report upgraded or gap lost")
+	}
+	for n := 0; n < 35; n++ {
+		f = input(fmt.Sprint(n))
+		f.OperationID = fmt.Sprint(n)
+		if _, _, err = e.Store.Ingest(context.Background(), f); err != nil {
 			t.Fatal(err)
 		}
-		r := bufio.NewReader(resp.Body)
-		var event string
+	}
+	snapshot, _ = e.Snapshot()
+	if len(snapshot.Sessions[0].Facts) != 32 || snapshot.Coverage != "partial" {
+		t.Fatal("operation history unbounded")
+	}
+}
+
+func TestHTTPScopesValidationAndSSERecovery(t *testing.T) {
+	e, root, _ := fixtureEngine(t, "codex")
+	write(t, filepath.Join(root, "x.jsonl"), header("one"))
+	scan(t, e)
+	handler := Handler(e, "READ_SECRET", "WRITE_SECRET")
+	for _, test := range []struct {
+		method, path, token, body string
+		status                    int
+	}{{"GET", "/v2/info", "", "", 401}, {"GET", "/v2/info", "WRITE_SECRET", "", 403}, {"POST", "/v2/ingest", "READ_SECRET", "{}", 403}, {"POST", "/v2/ingest", "WRITE_SECRET", "{SECRET_BROKEN", 400}, {"POST", "/v2/ingest", "WRITE_SECRET", strings.Repeat("x", MaxInput+1), 413}, {"GET", "/v1/status", "READ_SECRET", "", 410}} {
+		r := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+		r.Header.Set("Authorization", "Bearer "+test.token)
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != test.status {
+			t.Fatalf("%s %s: %d", test.method, test.path, w.Code)
+		}
+		if strings.Contains(w.Body.String(), "SECRET") {
+			t.Fatal("error leaked credential or body")
+		}
+	}
+	r := httptest.NewRequest("GET", "/v2/info", nil)
+	r.Header.Set("Authorization", "Bearer READ_SECRET")
+	r.Header.Set("Origin", "http://example.com")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+	if w.Code != 403 {
+		t.Fatal("Origin accepted")
+	}
+	b, _ := json.Marshal(input("http"))
+	for _, want := range []int{201, 200} {
+		r = httptest.NewRequest("POST", "/v2/ingest", bytes.NewReader(b))
+		r.Header.Set("Authorization", "Bearer WRITE_SECRET")
+		r.Header.Set("Content-Type", "application/json")
+		w = httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatal(w.Code, w.Body.String())
+		}
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	first := func(cursor string) string {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		r, _ := http.NewRequestWithContext(ctx, "GET", server.URL+"/v2/events", nil)
+		r.Header.Set("Authorization", "Bearer READ_SECRET")
+		r.Header.Set("Last-Event-ID", cursor)
+		resp, err := http.DefaultClient.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		reader := bufio.NewReader(resp.Body)
+		kind := ""
 		for {
-			line, err := r.ReadString('\n')
+			line, err := reader.ReadString('\n')
 			if err != nil {
-				resp.Body.Close()
-				cancel()
 				t.Fatal(err)
 			}
 			if strings.HasPrefix(line, "event: ") {
-				event = strings.TrimSpace(strings.TrimPrefix(line, "event: "))
+				kind = strings.TrimSpace(strings.TrimPrefix(line, "event: "))
 			}
 			if line == "\n" {
-				break
+				return kind
 			}
 		}
-		resp.Body.Close()
-		cancel()
-		if event != test.want {
-			t.Fatalf("want %s got %s", test.want, event)
-		}
+	}
+	if first("") != "snapshot" || first(e.Store.Epoch+":0") != "fact" || first("wrong:0") != "reset" {
+		t.Fatal("SSE recovery contract")
+	}
+	facts := make([]Fact, EventLimit+2)
+	for i := range facts {
+		facts[i] = Fact{InputEvent: input(fmt.Sprint(i)), Origin: "external", SourceID: "retention"}
+	}
+	if err := e.Store.Commit(nil, facts); err != nil {
+		t.Fatal(err)
+	}
+	retained := all(t, e)
+	if len(retained) != EventLimit || first(e.Store.Epoch+":0") != "reset" {
+		t.Fatal("retention/reset failed")
 	}
 }
 
-func TestFrameReaderNeverAcceptsPartialOrUncheckedFrames(t *testing.T) {
+func TestLeaseFrameBoundsAndWatcher(t *testing.T) {
+	leasePath := filepath.Join(t.TempDir(), "lease")
+	release, err := AcquireLease(leasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second, err := AcquireLease(leasePath); err == nil {
+		second()
+		t.Fatal("duplicate lease")
+	}
+	release()
 	b := frame(t, "{}\n")
 	for n := 0; n < len(b); n++ {
 		if _, err := frameSize(b[:n]); err == nil {
-			t.Fatalf("accepted partial frame at %d", n)
+			t.Fatal("partial frame accepted")
 		}
 	}
 	if n, err := frameSize(b); err != nil || n != len(b) {
-		t.Fatalf("full frame failed %d %v", n, err)
+		t.Fatal("complete frame rejected")
 	}
-	p := filepath.Join(t.TempDir(), "x.jsonl")
+	p := filepath.Join(t.TempDir(), "limit.jsonl")
 	write(t, p, strings.Repeat("x", maxLine+1))
 	f, _ := os.Open(p)
 	defer f.Close()
 	if _, err := readUnits(f, 0, maxLine+1); err == nil {
-		t.Fatal("unbounded line accepted")
+		t.Fatal("unbounded line")
 	}
-}
-
-func TestWatcherDiscoversNewDirectory(t *testing.T) {
 	e, root, _ := fixtureEngine(t, "codex")
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- e.Run(ctx, 250*time.Millisecond) }()
-	write(t, filepath.Join(root, "new", "rollout.jsonl"), header("one")+codex("task_started", "a", 0))
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	write(t, filepath.Join(root, "new", "x.jsonl"), header("one"))
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
-		s, err := e.Snapshot()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(s.Sessions) == 1 {
-			cancel()
-			if err := <-done; err != nil {
-				t.Fatal(err)
-			}
+		snapshot, _ := e.Snapshot()
+		if len(snapshot.Sessions) == 1 {
 			return
 		}
 		time.Sleep(25 * time.Millisecond)
@@ -519,78 +591,47 @@ func TestWatcherDiscoversNewDirectory(t *testing.T) {
 	t.Fatal("new directory not discovered")
 }
 
-func TestStaleEvidencePublishesUnknownWithoutCompletion(t *testing.T) {
-	e, root, _ := fixtureEngine(t, "codex")
-	write(t, filepath.Join(root, "one.jsonl"), header("one")+codex("task_started", "a", 0))
-	scan(t, e)
-	if one(t, e).State != "working" {
-		t.Fatal("fresh start missing")
-	}
-	_, before, _ := e.Store.Events(0)
-	e.Stale = time.Nanosecond
-	scan(t, e)
-	events, _, err := e.Store.Events(before)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(events) != 1 || events[0].Type != "state.changed" || events[0].Session.State != "unknown" || len(ended(t, e)) != 0 {
-		t.Fatal("staleness did not publish a conservative change")
+func TestRecoveryBoundsIncludeLargeIdentityAndPendingRecords(t *testing.T) {
+	for _, largeIdentity := range []bool{false, true} {
+		snapshot := Snapshot{Schema: 2, Epoch: "test", Coverage: "complete"}
+		for n := 0; n < 4096; n++ {
+			f := Fact{InputEvent: input(fmt.Sprint(n)), ID: int64(n + 1), SourceID: fmt.Sprint(n), Origin: "external"}
+			ledger := EvidenceSession{Agent: f.Agent, Namespace: f.Namespace, SessionID: f.SessionID, SourceID: f.SourceID, Origin: f.Origin, Facts: []Fact{f}, Coverage: "complete", IncompleteOperations: []string{}}
+			if largeIdentity {
+				ledger.Agent = strings.Repeat("界", 256)
+				ledger.Namespace = ledger.Agent
+				ledger.SessionID = ledger.Agent
+				for i := 0; i < 33; i++ {
+					ledger.IncompleteOperations = append(ledger.IncompleteOperations, strings.Repeat("界", 255)+"x")
+				}
+			} else {
+				ledger.Facts[0].NativeReason = strings.Repeat("界", 256)
+				ledger.Facts = append(ledger.Facts, ledger.Facts[0], ledger.Facts[0])
+			}
+			snapshot.Sessions = append(snapshot.Sessions, ledger)
+		}
+		boundSnapshot(&snapshot)
+		b, err := json.Marshal(snapshot)
+		if err != nil || len(b) > MaxSnapshotBytes || snapshot.Coverage != "partial" {
+			t.Fatalf("unbounded recovery: bytes=%d err=%v coverage=%s", len(b), err, snapshot.Coverage)
+		}
 	}
 }
 
-func TestEventRetentionRequiresReset(t *testing.T) {
-	e, root, _ := fixtureEngine(t, "codex")
-	write(t, filepath.Join(root, "one.jsonl"), header("one"))
-	scan(t, e)
-	s := one(t, e)
-	var src *Source
-	for _, v := range e.sources {
-		src = v
-	}
-	events := make([]Event, eventLimit+2)
-	for i := range events {
-		events[i] = Event{Type: "state.changed", Session: s}
-	}
-	if err := e.Store.Commit(src, events); err != nil {
-		t.Fatal(err)
-	}
-	retained, _, err := e.Store.Events(0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(retained) != eventLimit {
-		t.Fatal("event retention is unbounded")
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	req := httptest.NewRequest("GET", "http://localhost/v1/events", nil).WithContext(ctx)
-	req.Header.Set("Authorization", "Bearer token")
-	req.Header.Set("Last-Event-ID", e.Store.Epoch+":0")
-	server := httptest.NewServer(Handler(e, "token"))
-	defer server.Close()
-	req.URL.Scheme = "http"
-	req.URL.Host = strings.TrimPrefix(server.URL, "http://")
-	req.RequestURI = ""
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	r := bufio.NewReader(resp.Body)
-	found := false
-	for {
-		line, err := r.ReadString('\n')
-		if err != nil {
+func TestExternalDiagnosticsKeepAmbiguousNamesSeparate(t *testing.T) {
+	e, _, _ := fixtureEngine(t, "codex")
+	for i, pair := range [][2]string{{"ab", "c"}, {"a", "bc"}} {
+		f := input(fmt.Sprint(i))
+		f.Agent, f.Namespace = pair[0], pair[1]
+		if _, _, err := e.Store.Ingest(context.Background(), f); err != nil {
 			t.Fatal(err)
 		}
-		if line == "event: reset\n" {
-			found = true
-		}
-		if line == "\n" {
-			break
-		}
 	}
-	if !found {
-		t.Fatal("expired cursor did not reset")
+	b, _ := json.Marshal(e.Diagnostics())
+	var health struct {
+		Sources []SourceStatus `json:"sources"`
+	}
+	if err := json.Unmarshal(b, &health); err != nil || len(health.Sources) != 2 {
+		t.Fatalf("external diagnostic identity collision: %s", b)
 	}
 }

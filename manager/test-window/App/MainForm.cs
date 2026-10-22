@@ -6,7 +6,7 @@ public sealed class MainForm : Form
 {
     private readonly TextBox directoryBox = new() { ReadOnly = true, Dock = DockStyle.Fill };
     private readonly Label endpointLabel = new() { AutoSize = true };
-    private readonly Label statusLabel = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, Padding = new(12, 5, 12, 5) };
+    private readonly StatusBanner statusLabel = new() { Dock = DockStyle.Fill, Margin = new(3, 0, 3, 0), Padding = new(12, 5, 12, 5) };
     private readonly Label lastReceivedLabel = new() { AutoSize = true };
     private readonly Label countLabel = new() { AutoSize = true, Padding = new(12, 6, 0, 0) };
     private readonly Label watcherLabel = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
@@ -14,6 +14,7 @@ public sealed class MainForm : Form
     private readonly ComboBox stateFilter = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 170 };
     private readonly CheckBox pauseScroll = new() { Text = "暂停自动滚动", AutoSize = true, Padding = new(10, 5, 0, 0) };
     private readonly TextBox detailBox = new() { Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Both, WordWrap = false, BackColor = Color.White };
+    private readonly TextBox factDetailBox = new() { Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Both, WordWrap = false, BackColor = Color.White };
     private readonly DataGridView sessionsGrid = Grid();
     private readonly DataGridView eventsGrid = Grid();
     private readonly DataGridView rootsGrid = Grid();
@@ -56,7 +57,7 @@ public sealed class MainForm : Form
         Controls.Add(layout);
         var heading = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Margin = Padding.Empty };
         heading.Controls.Add(new Label { Text = "Agent Status Runtime", Font = new(Font.FontFamily, 18F, FontStyle.Bold), AutoSize = true, ForeColor = Color.FromArgb(24, 39, 64) });
-        heading.Controls.Add(new Label { Text = "真实会话与采集诊断  /  Windows 测试客户端", AutoSize = true, ForeColor = Color.FromArgb(92, 104, 122) });
+        heading.Controls.Add(new Label { Text = "事实采集与客户端解释  /  default-v1", AutoSize = true, ForeColor = Color.FromArgb(92, 104, 122) });
         layout.Controls.Add(heading, 0, 0);
         layout.Controls.Add(ConnectionBar(), 0, 1);
         layout.Controls.Add(statusLabel, 0, 2);
@@ -67,8 +68,10 @@ public sealed class MainForm : Form
         layout.Controls.Add(tabs, 0, 3);
         layout.Controls.Add(new Label { AutoSize = true, Padding = new(0, 6, 0, 0), ForeColor = Color.FromArgb(92, 104, 122), Text = "只读客户端 · 不启动或停止 Runtime · 文件证据不足时保留未知 · 时间显示为本机时区" }, 0, 4);
         sessionsGrid.SelectionChanged += (_, _) => UpdateDetail();
-        agentFilter.SelectedIndexChanged += (_, _) => RenderSessions(controller.State.View());
-        stateFilter.SelectedIndexChanged += (_, _) => RenderSessions(controller.State.View());
+        eventsGrid.CurrentCellChanged += (_, _) => factDetailBox.Text = eventsGrid.CurrentRow?.Tag is ClientEvent e
+            ? Display.FactDetail(e) : "选择事实以查看来源、原生时间及执行关联。";
+        agentFilter.SelectedIndexChanged += (_, _) => { if (!updatingRows) RenderSessions(controller.State.View()); };
+        stateFilter.SelectedIndexChanged += (_, _) => { if (!updatingRows) RenderSessions(controller.State.View()); };
         renderTimer.Tick += (_, _) => Render();
         Shown += async (_, _) =>
         {
@@ -134,7 +137,7 @@ public sealed class MainForm : Form
         layout.RowStyles.Add(new(SizeType.Absolute, 42));
         layout.RowStyles.Add(new(SizeType.Percent, 100));
         var filters = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
-        agentFilter.Items.AddRange(["全部 Agent", "codex", "claude", "deepseek", "pi"]);
+        agentFilter.Items.Add("全部 Agent");
         stateFilter.Items.AddRange(["全部状态", "工作中", "工具活动", "等待确认（推断）", "空闲", "未知"]);
         agentFilter.SelectedIndex = stateFilter.SelectedIndex = 0;
         filters.Controls.Add(new Label { Text = "Agent", AutoSize = true, Padding = new(0, 6, 0, 0) });
@@ -154,7 +157,7 @@ public sealed class MainForm : Form
 
     private TabPage EventsPage()
     {
-        var page = Page("实时事件");
+        var page = Page("事实与通知");
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1 };
         layout.RowStyles.Add(new(SizeType.Absolute, 42));
         layout.RowStyles.Add(new(SizeType.Percent, 100));
@@ -163,10 +166,13 @@ public sealed class MainForm : Form
         clear.Click += (_, _) => { controller.State.ClearEvents(); MarkDirty(); };
         tools.Controls.Add(clear);
         tools.Controls.Add(pauseScroll);
-        tools.Controls.Add(new Label { Text = "最多保留最近 500 条；时间为客户端接收时间。", AutoSize = true, Padding = new(14, 6, 0, 0) });
-        Columns(eventsGrid, [("接收时间", 160), ("事件类型", 160), ("Agent", 100), ("会话 ID", 190), ("对外状态", 130), ("结束结果", 125), ("说明", 300)]);
+        tools.Controls.Add(new Label { Text = "最近 500 条事实；绿色为结束通知；原始记录与客户端解释分开。", AutoSize = true, Padding = new(14, 6, 0, 0) });
+        Columns(eventsGrid, [("接收时间", 150), ("事实 / 通知", 140), ("Agent", 90), ("会话 ID", 155), ("来源", 90), ("原意 / 结果", 170), ("依据", 150), ("说明", 280)]);
         layout.Controls.Add(tools, 0, 0);
-        layout.Controls.Add(eventsGrid, 0, 1);
+        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, Size = new(1100, 490), SplitterDistance = 300, Panel1MinSize = 130, Panel2MinSize = 90, SplitterWidth = 6 };
+        split.Panel1.Controls.Add(eventsGrid);
+        split.Panel2.Controls.Add(factDetailBox);
+        layout.Controls.Add(split, 0, 1);
         page.Controls.Add(layout);
         return page;
     }
@@ -180,8 +186,8 @@ public sealed class MainForm : Form
         layout.RowStyles.Add(new(SizeType.Percent, 43));
         layout.RowStyles.Add(new(SizeType.Percent, 30));
         Columns(rootsGrid, [("Agent / 数据根目录", 780), ("可达性", 160)]);
-        Columns(sourcesGrid, [("来源 ID", 330), ("Agent", 130), ("健康", 120), ("格式版本", 100), ("降级原因", 400)]);
-        Columns(capabilitiesGrid, [("Agent", 100), ("入口", 140), ("格式", 90), ("活动", 110), ("工具", 110), ("人工等待", 160), ("回合结束", 170), ("桌面认证", 120)]);
+        Columns(sourcesGrid, [("来源 ID", 250), ("Agent", 100), ("类别", 100), ("命名空间", 220), ("健康", 100), ("格式版本", 80), ("降级原因", 300)]);
+        Columns(capabilitiesGrid, [("Agent", 100), ("入口", 130), ("格式", 80), ("可提供事实", 420), ("已知限制", 450)]);
         layout.Controls.Add(watcherLabel, 0, 0);
         layout.Controls.Add(Group("根目录", rootsGrid), 0, 1);
         layout.Controls.Add(Group("数据来源与降级原因", sourcesGrid), 0, 2);
@@ -229,13 +235,15 @@ public sealed class MainForm : Form
         endpointLabel.Text = $"服务：{Display.Value(view.Connection.Address)}    Runtime：{Display.Value(view.Info?.Version)}    ";
         lastReceivedLabel.Text = $"最后接收：{(view.LastReceivedAt is { } time ? Display.Time(time) : "未提供")}";
         string phase = view.Connection.Phase switch { "connected" => "已连接", "connecting" => "连接中", _ => "未连接" };
-        statusLabel.Text = $"{phase} | {(view.Connection.Phase == "connected" ? Display.Activity(data.Sessions, now) : view.Connection.Message)}";
+        statusLabel.Text = $"{phase} | {(view.Connection.Phase == "connected" ? Display.Activity(data.Sessions, now) : view.Connection.Message)}"
+            + (data.Coverage != "complete" ? " | 事实覆盖不完整／历史存在缺口" : "");
         statusLabel.BackColor = view.Connection.Phase switch { "connected" => Color.FromArgb(225, 243, 233), "connecting" => Color.FromArgb(229, 237, 253), _ => Color.FromArgb(255, 240, 221) };
         statusLabel.ForeColor = view.Connection.Phase == "connected" ? Color.FromArgb(21, 100, 65) : Color.FromArgb(102, 64, 24);
+        RenderSessions(data);
         var cursor = data.Cursor?.ToString();
         if (cursor != lastCursor || data.Events.Length != lastEventCount || data.Version != lastViewVersion)
         {
-            RenderSessions(data); RenderEvents(data);
+            RenderEvents(data);
             lastCursor = cursor; lastEventCount = data.Events.Length;
             lastViewVersion = data.Version;
         }
@@ -251,13 +259,20 @@ public sealed class MainForm : Form
         string? selected = (sessionsGrid.CurrentRow?.Tag as Session)?.SessionId;
         int top = Math.Max(0, sessionsGrid.FirstDisplayedScrollingRowIndex);
         updatingRows = true;
+        var agents = view.Sessions.Select(s => s.Agent).Distinct().Order().Prepend("全部 Agent").ToArray();
+        if (!agentFilter.Items.Cast<string>().SequenceEqual(agents))
+        {
+            string selectedAgent = agentFilter.SelectedItem?.ToString() ?? "全部 Agent";
+            agentFilter.Items.Clear(); agentFilter.Items.AddRange(agents);
+            agentFilter.SelectedItem = agents.Contains(selectedAgent) ? selectedAgent : "全部 Agent";
+        }
         sessionsGrid.Rows.Clear();
         var list = view.Sessions.Where(s => (agentFilter.SelectedIndex <= 0 || s.Agent == agentFilter.SelectedItem?.ToString())
             && (stateFilter.SelectedIndex <= 0 || Display.State(s.State) == stateFilter.SelectedItem?.ToString())).ToArray();
         foreach (var s in list)
         {
-            int i = sessionsGrid.Rows.Add(Display.Agent(s.Agent), Display.Surface(s.Surface), s.SessionId, Display.State(s.State),
-                Display.Confidence(s.Confidence), Display.Freshness(s.Freshness), Display.Outcome(s.Outcome), Display.Time(s.UpdatedAt), Display.Health(s.SourceHealth));
+            int i = sessionsGrid.Rows.Add(Display.Agent(s.Agent), Display.Surface(s.Surface), s.SessionId, Display.SessionState(s),
+                Display.Confidence(s.Confidence), Display.Freshness(s.Freshness), Display.SessionOutcome(s), Display.Time(s.UpdatedAt), Display.Health(s.SourceHealth));
             var row = sessionsGrid.Rows[i]; row.Tag = s;
             row.Cells[2].ToolTipText = s.SessionId;
             row.Cells[3].Style.ForeColor = row.Cells[3].Style.SelectionForeColor = Display.StateColor(s.State);
@@ -282,23 +297,31 @@ public sealed class MainForm : Form
 
     private void RenderEvents(StateView view)
     {
+        var selected = eventsGrid.CurrentRow?.Tag as ClientEvent;
         int top = Math.Max(0, eventsGrid.FirstDisplayedScrollingRowIndex);
         eventsGrid.Rows.Clear();
         foreach (var e in view.Events)
         {
-            int index = eventsGrid.Rows.Add(Display.Time(e.ReceivedAt), Display.Event(e.Type), e.Session is { } s ? Display.Agent(s.Agent) : "—",
-                e.Session?.SessionId ?? "—", Display.EventState(e),
-                e.Type == "turn.ended" ? Display.Outcome(e.Session?.Outcome) : "—", Display.EventDescription(e));
-            if (e.Type == "turn.ended")
+            var f = e.Fact;
+            int index = eventsGrid.Rows.Add(Display.Time(e.ReceivedAt), e.IsNotification ? "任务结束通知" : Display.Event(f?.Kind ?? e.Type),
+                Display.Agent(f?.Agent ?? ""), f?.SessionId ?? "—", Display.Origin(f?.Origin), Display.EventState(e),
+                f is null ? "—" : Display.Basis(f), Display.EventDescription(e));
+            eventsGrid.Rows[index].Tag = e;
+            if (e.IsNotification)
             {
                 var style = eventsGrid.Rows[index].DefaultCellStyle;
-                style.ForeColor = style.SelectionForeColor = e.Session?.Outcome switch
+                style.ForeColor = style.SelectionForeColor = e.NotificationOutcome switch
                 { "completed" => Color.FromArgb(21, 100, 65), "failed" => Color.FromArgb(170, 30, 30), _ => Color.FromArgb(146, 64, 14) };
                 style.BackColor = Color.FromArgb(240, 247, 242);
             }
         }
         if (eventsGrid.Rows.Count > 0)
+        {
+            var restore = eventsGrid.Rows.Cast<DataGridViewRow>().FirstOrDefault(r => Equals(r.Tag, selected)) ?? eventsGrid.Rows[0];
+            eventsGrid.CurrentCell = restore.Cells[0];
+            factDetailBox.Text = Display.FactDetail((ClientEvent)restore.Tag!);
             eventsGrid.FirstDisplayedScrollingRowIndex = pauseScroll.Checked ? Math.Min(top, eventsGrid.Rows.Count - 1) : eventsGrid.Rows.Count - 1;
+        }
     }
 
     private void RenderDiagnostics(ControllerView view)
@@ -311,14 +334,13 @@ public sealed class MainForm : Form
             foreach (var root in health.Roots) rootsGrid.Rows.Add(root.Key, Display.Health(root.Value));
             foreach (var source in health.Sources)
             {
-                int index = sourcesGrid.Rows.Add(source.Id, Display.Agent(source.Agent), Display.Health(source.Health), source.Format?.ToString() ?? "未提供", Display.Value(source.Reason));
+                int index = sourcesGrid.Rows.Add(source.Id, Display.Agent(source.Agent), Display.Origin(source.Origin), Display.Value(source.SessionNamespace), Display.Health(source.Health), source.Format?.ToString() ?? "未提供", Display.Value(source.Reason));
                 if (source.Health is "degraded" or "unavailable") sourcesGrid.Rows[index].DefaultCellStyle.ForeColor = Color.FromArgb(155, 58, 21);
             }
         }
         foreach (var c in view.Capabilities)
             capabilitiesGrid.Rows.Add(Display.Agent(c.Agent), c.Surfaces is null ? "未提供" : string.Join(" / ", c.Surfaces.Select(Display.Surface)),
-                c.Formats is null ? "未提供" : string.Join(", ", c.Formats), Display.Capability(c.Activity), Display.Capability(c.Tools),
-                Display.Capability(c.HumanWait), Display.Capability(c.TurnEnd), Display.Capability(c.DesktopCertification ?? ""));
+                c.Formats is null ? "未提供" : string.Join(", ", c.Formats), string.Join(" / ", c.Facts.Select(Display.Event)), string.Join(" / ", c.Limitations));
     }
 
     private static TabPage Page(string title) => new(title) { Padding = new(10), BackColor = Color.White };

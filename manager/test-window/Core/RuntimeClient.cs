@@ -58,7 +58,7 @@ public sealed class RuntimeClient : IDisposable
     public async Task SubscribeAsync(RuntimeConnection connection, Cursor? cursor, Func<SseMessage, Task> onMessage,
         Action onReceive, CancellationToken cancellationToken)
     {
-        using var request = Request(connection, "/v1/events");
+        using var request = Request(connection, "/v2/events");
         if (cursor is not null) request.Headers.Add("Last-Event-ID", cursor.ToString());
         using var headersTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         // When resuming at the latest cursor the Runtime flushes its first

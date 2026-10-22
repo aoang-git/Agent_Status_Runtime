@@ -40,8 +40,8 @@ public sealed class MonitorController(MonitorState state, RuntimeClient? client 
             {
                 var endpoint = await RuntimeConnection.LoadAsync(directory, cancellationToken);
                 SetConnection(new("connecting", "正在连接事件流…", endpoint.Endpoint.ToString()));
-                var runtimeInfo = await client.GetAsync<RuntimeInfo>(endpoint, "/v1/info", cancellationToken);
-                if (runtimeInfo.Schema != 1 || string.IsNullOrWhiteSpace(runtimeInfo.Epoch))
+                var runtimeInfo = await client.GetAsync<RuntimeInfo>(endpoint, "/v2/info", cancellationToken);
+                if (runtimeInfo.Schema != 2 || string.IsNullOrWhiteSpace(runtimeInfo.Epoch))
                     throw new InvalidDataException("不兼容的 Runtime 协议版本。");
                 lock (gate) info = runtimeInfo;
                 await RefreshDiagnostics(endpoint, attempt.Token);
@@ -59,7 +59,7 @@ public sealed class MonitorController(MonitorState state, RuntimeClient? client 
                     lock (gate)
                     {
                         lastReceived = DateTimeOffset.UtcNow;
-                        connection = new("connected", "仅读取真实监测数据", endpoint.Endpoint.ToString());
+                        connection = new("connected", "事实监测 · default-v1 客户端解释", endpoint.Endpoint.ToString());
                     }
                     Changed?.Invoke();
                 }, attempt.Token);
@@ -93,9 +93,9 @@ public sealed class MonitorController(MonitorState state, RuntimeClient? client 
 
     private async Task RefreshDiagnostics(RuntimeConnection endpoint, CancellationToken token)
     {
-        var healthTask = client.GetAsync<Health>(endpoint, "/v1/health", token);
-        var capabilitiesTask = client.GetAsync<Capability[]>(endpoint, "/v1/capabilities", token);
-        var snapshotTask = client.GetAsync<RuntimeSnapshot>(endpoint, "/v1/status", token);
+        var healthTask = client.GetAsync<Health>(endpoint, "/v2/health", token);
+        var capabilitiesTask = client.GetAsync<Capability[]>(endpoint, "/v2/capabilities", token);
+        var snapshotTask = client.GetAsync<RuntimeSnapshot>(endpoint, "/v2/snapshot", token);
         await Task.WhenAll(healthTask, capabilitiesTask, snapshotTask);
         if (healthTask.Result.Roots is null || healthTask.Result.Sources is null ||
             healthTask.Result.Sources.Any(source => source is null) || capabilitiesTask.Result.Any(capability => capability is null))

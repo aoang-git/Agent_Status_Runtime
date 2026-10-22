@@ -24,7 +24,7 @@ public sealed class ActivityTests
     public void StaleUnavailableAndUnknownEvidenceNeverClaimsActiveOrCompleted()
     {
         var stale = Sample("codex", "working", 200) with { Freshness = "stale" };
-        Assert.AreEqual("无活动：未知...3m20s", Display.Activity([stale], Now));
+        Assert.AreEqual("无活动：未知（证据过期）...3m20s", Display.Activity([stale], Now));
         Assert.AreEqual("无活动：未知...未提供", Display.Activity([], Now));
         Assert.AreEqual("无活动：未知...未提供", Display.Activity([stale with { SourceHealth = "unavailable" }], Now));
         Assert.AreEqual("DeepSeek：等待确认（推断）...1m0s", Display.Activity([Sample("deepseek", "waiting_confirmation", 60)], Now));

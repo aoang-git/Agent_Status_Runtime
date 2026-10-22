@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -22,10 +23,11 @@ type Engine struct {
 	mu            sync.Mutex
 	Store         *Store
 	Roots         []Root
-	Stale         time.Duration
 	sources       map[string]*Source
 	RootHealth    map[string]string
 	WatcherHealth string
+	bootstrapped  bool
+	startedAt     time.Time
 }
 
 func DefaultRoots() []Root {
@@ -44,10 +46,7 @@ func DefaultRoots() []Root {
 	}
 }
 
-func NewEngine(store *Store, roots []Root, stale time.Duration) (*Engine, error) {
-	if stale <= 0 {
-		return nil, errors.New("stale duration must be positive")
-	}
+func NewEngine(store *Store, roots []Root) (*Engine, error) {
 	sources, err := store.Load()
 	if err != nil {
 		return nil, err
@@ -71,7 +70,7 @@ func NewEngine(store *Store, roots []Root, stale time.Duration) (*Engine, error)
 			src.Bootstrap = info.Size()
 		}
 	}
-	return &Engine{Store: store, Roots: roots, Stale: stale, sources: sources, RootHealth: map[string]string{}, WatcherHealth: "polling"}, nil
+	return &Engine{Store: store, Roots: roots, sources: sources, RootHealth: map[string]string{}, WatcherHealth: "polling", startedAt: time.Now().UTC()}, nil
 }
 
 type candidate struct {
@@ -154,7 +153,7 @@ func (e *Engine) scan(watch func(string)) error {
 		src := e.sources[id]
 		if src == nil {
 			src = &Source{ID: id, Root: c.root, Path: c.path, Health: "healthy", Generation: c.generation}
-			if info, err := os.Stat(c.path); err == nil {
+			if info, err := os.Stat(c.path); err == nil && !e.bootstrapped {
 				src.Bootstrap = info.Size()
 			}
 		}
@@ -168,21 +167,8 @@ func (e *Engine) scan(watch func(string)) error {
 			continue
 		}
 		events := e.readSource(next)
-		if next.Session != nil {
-			s := next.Session
-			if s.State != "idle" && (s.UpdatedAt.IsZero() || time.Since(s.UpdatedAt) > e.Stale) {
-				s.State, s.Confidence, s.Reason = "unknown", "unknown", "stale_evidence"
-			}
-		}
-		// State changes are published after reducing a complete read batch, so a
-		// fast asked/decided pair never flashes a stale approval overlay.
-		before, _ := json.Marshal(src.Session)
-		after := publicSession(next, time.Now(), e.Stale)
-		afterBytes, _ := json.Marshal(next.Session)
-		if !bytes.Equal(before, afterBytes) || src.Health != next.Health {
-			if after != nil {
-				events = append(events, Event{Type: "state.changed", Session: after})
-			}
+		if next.Session != nil && (src.Health != next.Health || src.Reason != next.Reason) {
+			events = append(events, healthFact(next))
 		}
 		// Avoid rewriting checkpoints for every unchanged historical file.
 		oldJSON, _ := json.Marshal(src)
@@ -207,18 +193,19 @@ func (e *Engine) scan(watch func(string)) error {
 				}
 			}
 		}
-		events := []Event{}
+		events := []Fact{}
 		if next.Session != nil {
-			events = append(events, Event{Type: "source.degraded", Session: publicSession(next, time.Now(), e.Stale)})
+			events = append(events, healthFact(next))
 		}
 		if err := e.commit(next, events); err != nil {
 			return err
 		}
 	}
+	e.bootstrapped = true
 	return nil
 }
 
-func (e *Engine) commit(src *Source, events []Event) error {
+func (e *Engine) commit(src *Source, events []Fact) error {
 	if err := e.Store.Commit(src, events); err != nil {
 		return err
 	}
@@ -226,8 +213,8 @@ func (e *Engine) commit(src *Source, events []Event) error {
 	return nil
 }
 
-func (e *Engine) readSource(src *Source) []Event {
-	events := []Event{}
+func (e *Engine) readSource(src *Source) []Fact {
+	events := []Fact{}
 	f, err := os.Open(src.Path)
 	if err != nil {
 		src.Health, src.Reason = "unavailable", "source_open_failed"
@@ -240,10 +227,14 @@ func (e *Engine) readSource(src *Source) []Event {
 		return events
 	}
 	prefix, anchor := anchors(f, src.Offset)
-	if src.ParserRevision != 1 || info.Size() < src.Offset || prefix != src.Prefix || anchor != src.Anchor {
+	if src.Incarnation == "" {
+		src.Incarnation = randomToken()
+		src.ParserRevision = 2
+	} else if src.ParserRevision != 2 || info.Size() < src.Offset || prefix != src.Prefix || anchor != src.Anchor {
 		// A rebuilt source is a new historical baseline, not a new task.
 		src.Offset, src.Prefix, src.Anchor, src.Session, src.Parser, src.Bootstrap = 0, "", "", nil, ParserState{}, info.Size()
-		src.ParserRevision = 1
+		src.ParserRevision = 2
+		src.Incarnation = randomToken()
 	}
 	src.Health, src.Reason, src.ModTime = "healthy", "", info.ModTime().UTC()
 	if src.Root.Agent == "deepseek" && src.Offset == 0 {
@@ -256,8 +247,8 @@ func (e *Engine) readSource(src *Source) []Event {
 	for _, u := range units {
 		trial := cloneSource(src)
 		trial.Bootstrap = src.Bootstrap
-		unitEvents := []Event{}
-		for _, line := range u.Lines {
+		unitEvents := []Fact{}
+		for lineIndex, line := range u.Lines {
 			if len(bytes.TrimSpace(line)) == 0 {
 				continue
 			}
@@ -270,16 +261,28 @@ func (e *Engine) readSource(src *Source) []Event {
 				src.Prefix, src.Anchor = anchors(f, src.Offset)
 				return events
 			}
-			for _, fact := range facts {
-				if fact.At.IsZero() {
-					fact.At = src.ModTime
+			for factIndex, fact := range facts {
+				if trial.Session == nil {
+					continue
 				}
-				ended := apply(trial.Session, fact)
-				if ended && !fact.Silent && u.End > src.Bootstrap && trial.Session != nil {
-					s := *trial.Session
-					s.SourceHealth, s.Freshness = "healthy", "fresh"
-					unitEvents = append(unitEvents, Event{Type: "turn.ended", Session: &s})
+				fact.Schema = 2
+				fact.ProducerID = "file:" + trial.ID + ":" + trial.Incarnation
+				fact.EventID = digest(fmt.Sprintf("%d:%d:%d", u.End, lineIndex, factIndex))
+				fact.Agent, fact.Namespace, fact.SessionID = trial.Root.Agent, trial.Session.Namespace, trial.Session.ID
+				fact.SourceID, fact.Origin = trial.ID, "file"
+				fact.Historical = fact.Historical || u.End <= src.Bootstrap || fact.OccurredAt != nil && fact.OccurredAt.Before(e.startedAt)
+				encoded, _ := json.Marshal(fact.InputEvent)
+				if _, err := DecodeInput(encoded); err != nil {
+					src.Health, src.Reason = "degraded", "invalid_native_metadata"
+					src.Prefix, src.Anchor = anchors(f, src.Offset)
+					return events
 				}
+				if fact.Kind == "tool.observed" && fact.Data.CallID == "" {
+					src.Health, src.Reason = "degraded", "missing_tool_id"
+					src.Prefix, src.Anchor = anchors(f, src.Offset)
+					return events
+				}
+				unitEvents = append(unitEvents, fact)
 			}
 		}
 		trial.Offset = u.End
@@ -293,40 +296,14 @@ func (e *Engine) readSource(src *Source) []Event {
 	return events
 }
 
-func (e *Engine) Snapshot() (Snapshot, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	_, revision, err := e.Store.Events(1 << 62)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	snapshot := Snapshot{Schema: 1, Epoch: e.Store.Epoch, Revision: revision, Sessions: []*Session{}}
-	byID := map[string]*Session{}
-	for _, src := range e.sources {
-		if src.Health == "superseded" {
-			continue
-		}
-		allowed := false
-		for _, r := range e.Roots {
-			if src.Root == r {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			continue
-		}
-		if s := publicSession(src, time.Now(), e.Stale); s != nil {
-			if prior := byID[s.ID]; prior == nil || s.UpdatedAt.After(prior.UpdatedAt) {
-				byID[s.ID] = s
-			}
-		}
-	}
-	for _, s := range byID {
-		snapshot.Sessions = append(snapshot.Sessions, s)
-	}
-	sortSessions(snapshot.Sessions)
-	return snapshot, nil
+func (e *Engine) Snapshot() (Snapshot, error) { return e.Store.Snapshot() }
+func healthFact(src *Source) Fact {
+	f := observation("source.health", "source_health", "", time.Now().UTC(), EventData{Health: src.Health, Reason: src.Reason})
+	f.ProducerID = "file:" + src.ID + ":" + src.Incarnation
+	f.EventID = randomToken()
+	f.Agent, f.Namespace, f.SessionID = src.Root.Agent, src.Session.Namespace, src.Session.ID
+	f.SourceID, f.Origin = src.ID, "file"
+	return f
 }
 
 func (e *Engine) Diagnostics() any {
@@ -334,7 +311,25 @@ func (e *Engine) Diagnostics() any {
 	defer e.mu.Unlock()
 	sources := []SourceStatus{}
 	for _, src := range e.sources {
-		sources = append(sources, SourceStatus{ID: src.ID, Agent: src.Root.Agent, Health: src.Health, Reason: src.Reason, Format: src.Parser.Format})
+		sources = append(sources, SourceStatus{ID: src.ID, Agent: src.Root.Agent, Namespace: namespace(src.Root), Health: src.Health, Reason: src.Reason, Format: src.Parser.Format, Origin: "file"})
+	}
+	if snapshot, err := e.Store.Snapshot(); err == nil {
+		seen := map[string]bool{}
+		for _, ledger := range snapshot.Sessions {
+			if ledger.Origin != "external" {
+				continue
+			}
+			key := ledger.SourceID + "\x00" + ledger.Agent + "\x00" + ledger.Namespace
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			reason := "external_report_only"
+			if ledger.Coverage != "complete" {
+				reason = "sequence_gap_or_retention"
+			}
+			sources = append(sources, SourceStatus{ID: ledger.SourceID, Agent: ledger.Agent, Namespace: ledger.Namespace, Origin: "external", Health: "reported", Reason: reason})
+		}
 	}
 	sort.Slice(sources, func(i, j int) bool { return sources[i].ID < sources[j].ID })
 	roots := map[string]string{}

@@ -31,7 +31,7 @@ public static class SseReader
                 char character = buffer[index];
                 if (skipLf && character == '\n') { skipLf = false; continue; }
                 skipLf = character == '\r';
-                if (++frameSize > 1024 * 1024) throw new InvalidDataException("事件帧超过客户端读取上限。");
+                if (++frameSize > 8 * 1024 * 1024) throw new InvalidDataException("事件帧超过客户端读取上限。");
                 if (character is not ('\r' or '\n')) { lineBuffer.Append(character); continue; }
                 string line = lineBuffer.ToString(); lineBuffer.Clear();
                 if (line.Length == 0)

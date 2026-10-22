@@ -6,7 +6,10 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -25,44 +28,99 @@ func NewToken() string { return randomToken() }
 
 func Capabilities() any {
 	return []map[string]any{
-		{"agent": "codex", "surfaces": []string{"cli", "desktop"}, "source": "file", "activity": "partial", "tools": "partial", "human_wait": "unsupported", "turn_end": "explicit_records_only", "desktop_certification": "unverified"},
-		{"agent": "claude", "surfaces": []string{"cli", "desktop"}, "source": "file", "activity": "partial", "tools": "partial", "human_wait": "unsupported", "turn_end": "unsupported", "desktop_certification": "unverified"},
-		{"agent": "deepseek", "source": "file", "formats": []int{3, 4}, "activity": "partial", "tools": "partial", "human_wait": "inferred_requests_only", "turn_end": "explicit_records_only"},
-		{"agent": "pi", "source": "file", "formats": []int{3}, "activity": "partial", "tools": "partial", "human_wait": "unsupported", "turn_end": "unsupported", "no_session": "unsupported"},
+		{"agent": "codex", "surfaces": []string{"cli", "desktop"}, "source": "file", "facts": []string{"session.observed", "input.observed", "message.observed", "tool.observed", "lifecycle.observed"}, "limitations": []string{"desktop_unverified", "missing_turn_id_not_attributed"}},
+		{"agent": "claude", "surfaces": []string{"cli", "desktop"}, "source": "file", "facts": []string{"session.observed", "input.observed", "message.observed", "tool.observed"}, "limitations": []string{"message_end_is_not_run_end", "desktop_unverified"}},
+		{"agent": "deepseek", "source": "file", "formats": []int{3, 4}, "facts": []string{"session.observed", "message.observed", "tool.observed", "approval.observed", "lifecycle.observed"}, "limitations": []string{"approval_request_is_not_human_wait", "recovery_end_is_historical"}},
+		{"agent": "pi", "source": "file", "formats": []int{3}, "facts": []string{"session.observed", "input.observed", "message.observed", "tool.observed"}, "limitations": []string{"message_end_is_not_agent_settled", "in_memory_branches_not_observable"}},
 	}
 }
-
-func Handler(e *Engine, token string) http.Handler {
+func apiError(w http.ResponseWriter, status int, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"schema": 2, "error": code})
+}
+func Handler(e *Engine, readToken, writeToken string) http.Handler {
 	mux := http.NewServeMux()
-	jsonResponse := func(w http.ResponseWriter, v any) {
+	respond := func(w http.ResponseWriter, v any) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(v)
 	}
-	mux.HandleFunc("GET /v1/info", func(w http.ResponseWriter, r *http.Request) {
-		jsonResponse(w, map[string]any{"version": Version, "schema": 1, "mode": "passive", "epoch": e.Store.Epoch})
+	mux.HandleFunc("GET /v2/info", func(w http.ResponseWriter, r *http.Request) {
+		respond(w, map[string]any{"version": Version, "schema": 2, "mode": "facts", "epoch": e.Store.Epoch, "event_limit": EventLimit, "max_input_bytes": MaxInput, "max_snapshot_bytes": MaxSnapshotBytes, "idempotency_days": 7, "idempotency_limit": 100000})
 	})
-	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) { jsonResponse(w, e.Diagnostics()) })
-	mux.HandleFunc("GET /v1/capabilities", func(w http.ResponseWriter, r *http.Request) { jsonResponse(w, Capabilities()) })
-	snapshot := func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v2/schema", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/schema+json")
+		_, _ = w.Write(SchemaJSON())
+	})
+	mux.HandleFunc("GET /v2/health", func(w http.ResponseWriter, r *http.Request) { respond(w, e.Diagnostics()) })
+	mux.HandleFunc("GET /v2/capabilities", func(w http.ResponseWriter, r *http.Request) { respond(w, Capabilities()) })
+	mux.HandleFunc("GET /v2/snapshot", func(w http.ResponseWriter, r *http.Request) {
 		s, err := e.Snapshot()
 		if err != nil {
-			http.Error(w, "snapshot_failed", 500)
+			apiError(w, 503, "snapshot_failed")
 			return
 		}
-		jsonResponse(w, s)
-	}
-	mux.HandleFunc("GET /v1/status", snapshot)
-	mux.HandleFunc("GET /v1/sessions", snapshot)
-	mux.HandleFunc("GET /v1/events", func(w http.ResponseWriter, r *http.Request) { stream(r.Context(), w, r, e) })
+		respond(w, s)
+	})
+	mux.HandleFunc("GET /v2/events", func(w http.ResponseWriter, r *http.Request) { stream(r.Context(), w, r, e) })
+	mux.HandleFunc("POST /v2/ingest", func(w http.ResponseWriter, r *http.Request) {
+		media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil || media != "application/json" {
+			apiError(w, 415, "json_required")
+			return
+		}
+		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(2 * time.Second))
+		b, err := io.ReadAll(io.LimitReader(r.Body, MaxInput+1))
+		if err != nil {
+			apiError(w, 400, "body_read_failed")
+			return
+		}
+		if len(b) > MaxInput {
+			apiError(w, 413, "body_too_large")
+			return
+		}
+		input, err := DecodeInput(b)
+		if err != nil {
+			apiError(w, 400, err.Error())
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		defer cancel()
+		id, duplicate, err := e.Store.Ingest(ctx, input)
+		if errors.Is(err, ErrConflict) {
+			apiError(w, 409, "event_id_conflict")
+			return
+		}
+		if err != nil {
+			apiError(w, 503, "storage_failed")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if !duplicate {
+			w.WriteHeader(201)
+		}
+		respond(w, map[string]any{"schema": 2, "id": id, "epoch": e.Store.Epoch, "duplicate": duplicate})
+	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		if token == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		if r.Header.Get("Origin") != "" {
+			apiError(w, 403, "cross_origin_requests_not_supported")
 			return
 		}
-		if r.Header.Get("Origin") != "" {
-			http.Error(w, "cross_origin_requests_not_supported", http.StatusForbidden)
+		auth := r.Header.Get("Authorization")
+		isRead := readToken != "" && subtle.ConstantTimeCompare([]byte(auth), []byte("Bearer "+readToken)) == 1
+		isWrite := writeToken != "" && subtle.ConstantTimeCompare([]byte(auth), []byte("Bearer "+writeToken)) == 1
+		if !isRead && !isWrite {
+			apiError(w, 401, "unauthorized")
+			return
+		}
+		if (r.URL.Path == "/v2/ingest" && !isWrite) || (r.URL.Path != "/v2/ingest" && !isRead) {
+			apiError(w, 403, "insufficient_scope")
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/v1/") {
+			apiError(w, 410, "protocol_upgrade_required")
 			return
 		}
 		mux.ServeHTTP(w, r)
@@ -79,13 +137,13 @@ func stream(ctx context.Context, w http.ResponseWriter, r *http.Request, e *Engi
 	if cursor != "" {
 		parts := strings.Split(cursor, ":")
 		if len(parts) != 2 {
-			http.Error(w, "invalid_cursor", 400)
+			apiError(w, 400, "invalid_cursor")
 			return
 		}
 		var err error
 		after, err = strconv.ParseInt(parts[1], 10, 64)
 		if err != nil || after < 0 {
-			http.Error(w, "invalid_cursor", 400)
+			apiError(w, 400, "invalid_cursor")
 			return
 		}
 		reset = parts[0] != e.Store.Epoch
@@ -137,7 +195,7 @@ func stream(ctx context.Context, w http.ResponseWriter, r *http.Request, e *Engi
 			after = s.Revision
 		} else {
 			for _, event := range events {
-				if send(event.Type, event.ID, event) != nil {
+				if send("fact", event.ID, event) != nil {
 					return
 				}
 				after = event.ID

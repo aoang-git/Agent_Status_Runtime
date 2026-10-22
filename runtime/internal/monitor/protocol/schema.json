@@ -1,0 +1,1347 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-status-runtime:v2",
+  "title": "Agent Status Runtime v2",
+  "$ref": "#/$defs/input",
+  "$defs": {
+    "input": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": 2
+        },
+        "producer_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "event_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "agent": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "session_namespace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "operation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "enum": [
+            "session.observed",
+            "input.observed",
+            "message.observed",
+            "tool.observed",
+            "approval.observed",
+            "lifecycle.observed",
+            "state.reported",
+            "source.heartbeat"
+          ]
+        },
+        "data": {
+          "type": "object"
+        },
+        "native_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "native_reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "reported_basis": {
+          "enum": [
+            "native_event",
+            "inferred",
+            "self_report"
+          ],
+          "default": "self_report"
+        },
+        "stream_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "source_sequence": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "schema",
+        "producer_id",
+        "event_id",
+        "agent",
+        "session_id",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false,
+      "dependentRequired": {
+        "stream_id": [
+          "source_sequence"
+        ],
+        "source_sequence": [
+          "stream_id"
+        ]
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "session.observed"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "surface": {
+                    "enum": [
+                      "cli",
+                      "desktop",
+                      "subagent",
+                      "unknown"
+                    ]
+                  },
+                  "agent_version": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "parent_session_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "message_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "parent_node_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "branch_changed": {
+                    "type": "boolean"
+                  }
+                },
+                "additionalProperties": false,
+                "required": []
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "input.observed"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "message_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  }
+                },
+                "additionalProperties": false,
+                "required": []
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "message.observed"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "enum": [
+                      "user",
+                      "assistant",
+                      "system",
+                      "tool"
+                    ]
+                  },
+                  "stop_reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "message_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "parent_node_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "has_tools": {
+                    "type": "boolean"
+                  },
+                  "outcome": {
+                    "enum": [
+                      "completed",
+                      "interrupted",
+                      "failed",
+                      "unknown"
+                    ]
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "role"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "tool.observed"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "call_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "phase": {
+                    "enum": [
+                      "requested",
+                      "started",
+                      "finished"
+                    ]
+                  },
+                  "outcome": {
+                    "enum": [
+                      "completed",
+                      "interrupted",
+                      "failed",
+                      "unknown"
+                    ]
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "call_id",
+                  "phase"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "approval.observed"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "phase": {
+                    "enum": [
+                      "requested",
+                      "resolved"
+                    ]
+                  },
+                  "decision": {
+                    "enum": [
+                      "allowed",
+                      "denied",
+                      "unknown"
+                    ]
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "request_id",
+                  "phase"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "lifecycle.observed"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "phase": {
+                    "enum": [
+                      "started",
+                      "ended"
+                    ]
+                  },
+                  "scope": {
+                    "enum": [
+                      "message",
+                      "agent_turn",
+                      "agent_run",
+                      "session"
+                    ]
+                  },
+                  "outcome": {
+                    "enum": [
+                      "completed",
+                      "interrupted",
+                      "failed",
+                      "unknown"
+                    ]
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "phase",
+                  "scope"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "state.reported"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "working",
+                      "tool_activity",
+                      "waiting_confirmation",
+                      "idle",
+                      "completed",
+                      "interrupted",
+                      "failed",
+                      "unknown",
+                      "offline"
+                    ]
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "state"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "source.heartbeat"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+                "required": []
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "state.reported"
+              },
+              "data": {
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "completed",
+                      "interrupted",
+                      "failed"
+                    ]
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ]
+          },
+          "then": {
+            "required": [
+              "operation_id"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "lifecycle.observed"
+              },
+              "data": {
+                "properties": {
+                  "outcome": {
+                    "enum": [
+                      "completed",
+                      "interrupted",
+                      "failed"
+                    ]
+                  }
+                },
+                "required": [
+                  "outcome"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ]
+          },
+          "then": {
+            "required": [
+              "operation_id"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "lifecycle.observed"
+              },
+              "data": {
+                "properties": {
+                  "phase": {
+                    "const": "started"
+                  }
+                },
+                "required": [
+                  "phase"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "not": {
+                  "required": [
+                    "outcome"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "fact": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": 2
+        },
+        "producer_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "event_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "agent": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "session_namespace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "operation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "enum": [
+            "session.observed",
+            "input.observed",
+            "message.observed",
+            "tool.observed",
+            "approval.observed",
+            "lifecycle.observed",
+            "state.reported",
+            "source.heartbeat",
+            "source.health"
+          ]
+        },
+        "data": {
+          "type": "object"
+        },
+        "native_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "native_reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "reported_basis": {
+          "enum": [
+            "native_event",
+            "inferred",
+            "self_report"
+          ],
+          "default": "self_report"
+        },
+        "stream_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "source_sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "received_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "origin": {
+          "enum": [
+            "file",
+            "external"
+          ]
+        },
+        "historical": {
+          "type": "boolean"
+        },
+        "source_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "sequence_gap": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema",
+        "producer_id",
+        "event_id",
+        "agent",
+        "session_id",
+        "kind",
+        "data",
+        "session_namespace",
+        "id",
+        "received_at",
+        "origin",
+        "historical",
+        "source_id"
+      ],
+      "additionalProperties": false,
+      "dependentRequired": {
+        "stream_id": [
+          "source_sequence"
+        ],
+        "source_sequence": [
+          "stream_id"
+        ]
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "session.observed"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "surface": {
+                    "enum": [
+                      "cli",
+                      "desktop",
+                      "subagent",
+                      "unknown"
+                    ]
+                  },
+                  "agent_version": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "parent_session_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "message_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "parent_node_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "branch_changed": {
+                    "type": "boolean"
+                  }
+                },
+                "additionalProperties": false,
+                "required": []
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "input.observed"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "message_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  }
+                },
+                "additionalProperties": false,
+                "required": []
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "message.observed"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "enum": [
+                      "user",
+                      "assistant",
+                      "system",
+                      "tool"
+                    ]
+                  },
+                  "stop_reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "message_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "parent_node_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "has_tools": {
+                    "type": "boolean"
+                  },
+                  "outcome": {
+                    "enum": [
+                      "completed",
+                      "interrupted",
+                      "failed",
+                      "unknown"
+                    ]
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "role"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "tool.observed"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "call_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "phase": {
+                    "enum": [
+                      "requested",
+                      "started",
+                      "finished"
+                    ]
+                  },
+                  "outcome": {
+                    "enum": [
+                      "completed",
+                      "interrupted",
+                      "failed",
+                      "unknown"
+                    ]
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "call_id",
+                  "phase"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "approval.observed"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "phase": {
+                    "enum": [
+                      "requested",
+                      "resolved"
+                    ]
+                  },
+                  "decision": {
+                    "enum": [
+                      "allowed",
+                      "denied",
+                      "unknown"
+                    ]
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "request_id",
+                  "phase"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "lifecycle.observed"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "phase": {
+                    "enum": [
+                      "started",
+                      "ended"
+                    ]
+                  },
+                  "scope": {
+                    "enum": [
+                      "message",
+                      "agent_turn",
+                      "agent_run",
+                      "session"
+                    ]
+                  },
+                  "outcome": {
+                    "enum": [
+                      "completed",
+                      "interrupted",
+                      "failed",
+                      "unknown"
+                    ]
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "phase",
+                  "scope"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "state.reported"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "working",
+                      "tool_activity",
+                      "waiting_confirmation",
+                      "idle",
+                      "completed",
+                      "interrupted",
+                      "failed",
+                      "unknown",
+                      "offline"
+                    ]
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "state"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "source.heartbeat"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+                "required": []
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "state.reported"
+              },
+              "data": {
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "completed",
+                      "interrupted",
+                      "failed"
+                    ]
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ]
+          },
+          "then": {
+            "required": [
+              "operation_id"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "lifecycle.observed"
+              },
+              "data": {
+                "properties": {
+                  "outcome": {
+                    "enum": [
+                      "completed",
+                      "interrupted",
+                      "failed"
+                    ]
+                  }
+                },
+                "required": [
+                  "outcome"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ]
+          },
+          "then": {
+            "required": [
+              "operation_id"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "lifecycle.observed"
+              },
+              "data": {
+                "properties": {
+                  "phase": {
+                    "const": "started"
+                  }
+                },
+                "required": [
+                  "phase"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "not": {
+                  "required": [
+                    "outcome"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "source.health"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "health": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+                  }
+                },
+                "required": [
+                  "health"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "properties": {
+        "agent": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "session_namespace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "source_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "origin": {
+          "enum": [
+            "file",
+            "external"
+          ]
+        },
+        "coverage": {
+          "enum": [
+            "complete",
+            "partial"
+          ]
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/fact"
+          }
+        },
+        "incomplete_operations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1
+          },
+          "maxItems": 33
+        }
+      },
+      "required": [
+        "agent",
+        "session_namespace",
+        "session_id",
+        "source_id",
+        "origin",
+        "coverage",
+        "facts",
+        "incomplete_operations"
+      ],
+      "additionalProperties": false
+    },
+    "snapshot": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": 2
+        },
+        "epoch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "coverage": {
+          "enum": [
+            "complete",
+            "partial"
+          ]
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "epoch",
+        "revision",
+        "coverage",
+        "sessions"
+      ],
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "schema": {
+          "const": 2
+        }
+      },
+      "required": [
+        "schema",
+        "error"
+      ],
+      "additionalProperties": false
+    },
+    "ack": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": 2
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "epoch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+        },
+        "duplicate": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema",
+        "id",
+        "epoch",
+        "duplicate"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

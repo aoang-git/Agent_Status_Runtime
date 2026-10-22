@@ -9,12 +9,12 @@ namespace Tests;
 public sealed class ClientTests
 {
     private static string Json(object value) => JsonSerializer.Serialize(value, Wire.Json);
-    private static Session Sample(string id = "one", string state = "working") => new()
-    { SessionId = id, NativeSessionId = id, Agent = "codex", State = state, UpdatedAt = DateTimeOffset.UtcNow };
-    private static SseMessage Snapshot(string epoch = "a", long revision = 0, string type = "snapshot", params Session[] sessions) =>
-        new($"{epoch}:{revision}", type, Json(new RuntimeSnapshot(1, epoch, revision, sessions)));
-    private static SseMessage Change(long id, Session session, string type = "state.changed") =>
-        new($"a:{id}", type, Json(new RuntimeEvent(id, type, session)));
+    private static Fact Sample(long id=1, string kind="input.observed", string origin="file") => new()
+    { Id=id, ProducerId="p", EventId=id.ToString(), Agent="codex", SessionNamespace="local", SessionId="one", OperationId="op", Kind=kind, SourceId="source", Origin=origin, ReceivedAt=DateTimeOffset.UtcNow, OccurredAt=DateTimeOffset.UtcNow };
+    private static EvidenceSession Ledger(params Fact[] facts) => new("codex","local","one","source","file",facts);
+    private static SseMessage Snapshot(string epoch="a",long revision=0,string type="snapshot",params Fact[] facts) =>
+        new($"{epoch}:{revision}",type,Json(new RuntimeSnapshot(2,epoch,revision,facts.Length==0?[]:[Ledger(facts)])));
+    private static SseMessage Change(long id, Fact? fact=null) => new($"a:{id}","fact",Json(fact??Sample(id)));
 
     [TestMethod]
     public async Task MissingDamagedAndNonLocalConnectionFilesAreRejected()
@@ -58,7 +58,7 @@ public sealed class ClientTests
             Assert.AreEqual("SECRET", request.Headers.Authorization?.Parameter);
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Unauthorized));
         }));
-        var error = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetAsync<RuntimeInfo>(new(new("http://127.0.0.1:9120"), "SECRET"), "/v1/info", default));
+        var error = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetAsync<RuntimeInfo>(new(new("http://127.0.0.1:9120"), "SECRET"), "/v2/info", default));
         Assert.AreEqual(HttpStatusCode.Unauthorized, error.StatusCode);
         Assert.DoesNotContain("SECRET", error.Message);
     }
@@ -77,71 +77,62 @@ public sealed class ClientTests
     }
 
     [TestMethod]
-    public void SnapshotsResetsAndDeduplicationDoNotInventTurnEndEvents()
+    public void SnapshotsResetsAndDuplicateFactsDoNotInventNotifications()
     {
-        var state = new MonitorState();
-        state.Apply(Snapshot(sessions: [Sample()]));
-        Assert.IsFalse(state.Apply(Snapshot(sessions: [Sample()])));
-        Assert.HasCount(1, state.View().Events);
-        Assert.IsTrue(state.Apply(Change(1, Sample(state: "idle"), "turn.ended")));
-        Assert.IsFalse(state.Apply(Change(1, Sample())));
-        state.Apply(Snapshot("b", 8, "reset", Sample("new")));
-        Assert.IsFalse(state.Apply(Snapshot("b", 8, "reset", Sample("new"))));
-        Assert.HasCount(1, state.View().Sessions);
-        Assert.AreEqual("new", state.View().Sessions[0].SessionId);
-        Assert.AreEqual("b:8", state.View().Cursor?.ToString());
-        Assert.HasCount(1, state.View().Events.Where(e => e.Type == "turn.ended").ToArray());
-        Assert.AreEqual("reset", state.View().Events[^1].Type);
-    }
-
-    [TestMethod]
-    public void GapsAndMismatchedEpochsRequestFreshSnapshots()
-    {
-        var state = new MonitorState(); state.Apply(Snapshot(sessions: [Sample()]));
-        Assert.Throws<InvalidDataException>(() => state.Apply(Change(2, Sample())));
-        Assert.Throws<InvalidDataException>(() => state.Apply(Change(1, Sample()) with { Id = "wrong:1" }));
-        Assert.AreEqual("a:0", state.View().Cursor?.ToString());
-        Assert.HasCount(1, state.View().Sessions);
-    }
-
-    [TestMethod]
-    public void EventHistoryIsBoundedAndClearDoesNotLoseSnapshotOrCursor()
-    {
-        var state = new MonitorState(); state.Apply(Snapshot(sessions: [Sample()]));
-        for (int id = 1; id <= 700; id++) state.Apply(Change(id, Sample()));
-        Assert.HasCount(500, state.View().Events);
+        var state=new MonitorState();
+        state.Apply(Snapshot(revision:1,facts:[Sample()]));
+        Assert.IsFalse(state.Apply(Snapshot(revision:1,facts:[Sample()])));
+        var ended=Sample(2,"lifecycle.observed") with {Data=new(){Phase="ended",Scope="agent_turn",Outcome="completed"}};
+        Assert.IsTrue(state.Apply(Change(2,ended)));
+        Assert.IsFalse(state.Apply(Change(2,ended)));
+        Assert.HasCount(1,state.View().Events.Where(e=>e.IsNotification).ToArray());
         state.ClearEvents();
-        Assert.HasCount(0, state.View().Events);
-        Assert.HasCount(1, state.View().Sessions);
-        Assert.AreEqual(700L, state.View().Cursor?.Revision);
+        state.Apply(Change(3,ended with {Id=3}));
+        Assert.HasCount(0,state.View().Events.Where(e=>e.IsNotification).ToArray());
+        state.Apply(Snapshot("b",8,"reset",ended with {Id=8,Historical=true}));
+        Assert.HasCount(0,state.View().Events.Where(e=>e.IsNotification).ToArray());
+        Assert.AreEqual("b:8",state.View().Cursor?.ToString());
     }
 
     [TestMethod]
-    public void ReconciliationUpdatesFreshnessAndRemovesSupersededSourcesWithoutConsumingEvents()
+    public void GapsAndMismatchedEpochsKeepTheLastSnapshot()
     {
-        var state = new MonitorState();
-        state.Apply(Snapshot(sessions: [Sample("old"),Sample("same")]));
-        state.Apply(Change(1,Sample("same") with { TurnId="new",SourceHealth="healthy" }));
-        state.Apply(Change(2,Sample("same") with { SourceHealth="superseded" },"source.degraded"));
-        Assert.AreEqual("healthy",state.View().Sessions.Single(s=>s.SessionId=="same").SourceHealth);
-        var count=state.View().Events.Length;
-        var version=state.View().Version;
-        Assert.IsTrue(state.Reconcile(new(1,"a",4,[Sample("same","idle") with {Freshness="stale"}])));
+        var state=new MonitorState();state.Apply(Snapshot(revision:1,facts:[Sample()]));
+        Assert.Throws<InvalidDataException>(()=>state.Apply(Change(3)));
+        Assert.Throws<InvalidDataException>(()=>state.Apply(Change(2) with {Id="wrong:2"}));
+        Assert.AreEqual("a:1",state.View().Cursor?.ToString());
         Assert.HasCount(1,state.View().Sessions);
-        Assert.AreEqual("stale",state.View().Sessions[0].Freshness);
-        Assert.AreEqual(2L,state.View().Cursor?.Revision);
-        Assert.IsGreaterThan(version,state.View().Version);
-        Assert.IsFalse(state.Reconcile(new(1,"a",1,[Sample("old")])));
-        state.Apply(Change(3,Sample("old"),"turn.ended"));
-        Assert.HasCount(1,state.View().Sessions);
-        Assert.HasCount(count+1,state.View().Events);
-        Assert.AreEqual("turn.ended",state.View().Events[^1].Type);
+    }
+
+    [TestMethod]
+    public void EventHistoryIsBoundedAndClearPreservesSnapshotAndCursor()
+    {
+        var state=new MonitorState();state.Apply(Snapshot());
+        for(int id=1;id<=700;id++)state.Apply(Change(id));
+        Assert.HasCount(500,state.View().Events);state.ClearEvents();
+        Assert.HasCount(0,state.View().Events);Assert.HasCount(1,state.View().Sessions);
+        Assert.AreEqual(700L,state.View().Cursor?.Revision);
+    }
+
+    [TestMethod]
+    public void SnapshotAheadOfSseDoesNotConsumeNotificationsOrRevertTheView()
+    {
+        var state=new MonitorState();state.Apply(Snapshot(revision:1,facts:[Sample()]));
+        var ended=Sample(2,"lifecycle.observed") with {Data=new(){Phase="ended",Scope="agent_turn",Outcome="completed"}};
+        var next=Sample(3) with {OperationId="new"};
+        Assert.IsTrue(state.Reconcile(new(2,"a",3,[Ledger(Sample(),ended,next)])));
+        Assert.AreEqual(1L,state.View().Cursor?.Revision);
+        state.Apply(Change(2,ended));
+        Assert.HasCount(1,state.View().Events.Where(e=>e.IsNotification).ToArray());
+        Assert.AreEqual("new",state.View().Sessions[0].TurnId);
+        state.Apply(Change(3,next));
+        Assert.IsFalse(state.Reconcile(new(2,"a",1,[Ledger(Sample())])));
     }
 
     [TestMethod]
     public async Task OversizedUnterminatedSseLineIsBounded()
     {
-        using var stream=new MemoryStream(Encoding.UTF8.GetBytes("data: "+new string('x',1024*1024)));
+        using var stream=new MemoryStream(Encoding.UTF8.GetBytes("data: "+new string('x',8*1024*1024)));
         await Assert.ThrowsAsync<InvalidDataException>(async()=>
         {await foreach(var _ in SseReader.ReadAsync(stream,()=>{},default)){} });
     }
@@ -172,20 +163,20 @@ public sealed class ClientTests
         using var client = new RuntimeClient(new FakeHandler(async (request, token) =>
         {
             var route = request.RequestUri!.AbsolutePath;
-            if (route == "/v1/info")
+            if (route == "/v2/info")
             {
                 if (request.Headers.Authorization?.Parameter == "new-token") newTokenSeen = true;
-                return JsonResponse(new RuntimeInfo("sample", 1, "passive", "a"));
+                return JsonResponse(new RuntimeInfo("sample", 2, "facts", "a"));
             }
-            if (route == "/v1/health") return JsonResponse(new Health([], [], "polling"));
-            if (route == "/v1/capabilities") return JsonResponse(Array.Empty<Capability>());
-            if (route == "/v1/status") return JsonResponse(new RuntimeSnapshot(1,"a",0,[Sample()]));
+            if (route == "/v2/health") return JsonResponse(new Health([], [], "polling"));
+            if (route == "/v2/capabilities") return JsonResponse(Array.Empty<Capability>());
+            if (route == "/v2/snapshot") return JsonResponse(new RuntimeSnapshot(2,"a",0,[]));
             if (Interlocked.Increment(ref streams) == 1)
             {
                 await File.WriteAllTextAsync(path, Json(new { url = "http://127.0.0.1:9120", token = "new-token" }), token);
                 return new(HttpStatusCode.Unauthorized);
             }
-            var snapshot = Snapshot(sessions: [Sample()]);
+            var snapshot = Snapshot(revision:1,facts: [Sample()]);
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent($"id: {snapshot.Id}\nevent: snapshot\ndata: {snapshot.Data}\n\n", Encoding.UTF8, "text/event-stream")

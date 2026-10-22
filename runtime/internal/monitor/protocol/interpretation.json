@@ -1,0 +1,297 @@
+{
+  "rule_version": "default-v1",
+  "now": "2026-10-23T00:00:00Z",
+  "cases": [
+    {
+      "name": "codex_explicit_end",
+      "facts": [
+        {
+          "schema": 2,
+          "producer_id": "example",
+          "event_id": "1",
+          "agent": "codex",
+          "session_namespace": "local",
+          "session_id": "s",
+          "operation_id": "op",
+          "kind": "lifecycle.observed",
+          "data": {
+            "phase": "started",
+            "scope": "agent_turn"
+          },
+          "id": 1,
+          "received_at": "2026-10-23T00:00:00Z",
+          "occurred_at": "2026-10-23T00:00:00Z",
+          "origin": "file",
+          "historical": false,
+          "source_id": "file"
+        },
+        {
+          "schema": 2,
+          "producer_id": "example",
+          "event_id": "2",
+          "agent": "codex",
+          "session_namespace": "local",
+          "session_id": "s",
+          "operation_id": "op",
+          "kind": "lifecycle.observed",
+          "data": {
+            "phase": "ended",
+            "scope": "agent_turn",
+            "outcome": "completed"
+          },
+          "id": 2,
+          "received_at": "2026-10-23T00:00:00Z",
+          "occurred_at": "2026-10-23T00:00:00Z",
+          "origin": "file",
+          "historical": false,
+          "source_id": "file"
+        }
+      ],
+      "state": "idle",
+      "confidence": "observed",
+      "outcome": "completed"
+    },
+    {
+      "name": "deepseek_explicit_end",
+      "facts": [
+        {
+          "schema": 2,
+          "producer_id": "example",
+          "event_id": "1",
+          "agent": "deepseek",
+          "session_namespace": "local",
+          "session_id": "s",
+          "operation_id": "op",
+          "kind": "lifecycle.observed",
+          "data": {
+            "phase": "started",
+            "scope": "agent_turn"
+          },
+          "id": 1,
+          "received_at": "2026-10-23T00:00:00Z",
+          "occurred_at": "2026-10-23T00:00:00Z",
+          "origin": "file",
+          "historical": false,
+          "source_id": "file"
+        },
+        {
+          "schema": 2,
+          "producer_id": "example",
+          "event_id": "2",
+          "agent": "deepseek",
+          "session_namespace": "local",
+          "session_id": "s",
+          "operation_id": "op",
+          "kind": "lifecycle.observed",
+          "data": {
+            "phase": "ended",
+            "scope": "agent_turn",
+            "outcome": "completed"
+          },
+          "id": 2,
+          "received_at": "2026-10-23T00:00:00Z",
+          "occurred_at": "2026-10-23T00:00:00Z",
+          "origin": "file",
+          "historical": false,
+          "source_id": "file"
+        }
+      ],
+      "state": "idle",
+      "confidence": "observed",
+      "outcome": "completed"
+    },
+    {
+      "name": "claude_message_only",
+      "facts": [
+        {
+          "schema": 2,
+          "producer_id": "example",
+          "event_id": "1",
+          "agent": "claude",
+          "session_namespace": "local",
+          "session_id": "s",
+          "operation_id": "op",
+          "kind": "input.observed",
+          "data": {},
+          "id": 1,
+          "received_at": "2026-10-23T00:00:00Z",
+          "occurred_at": "2026-10-23T00:00:00Z",
+          "origin": "file",
+          "historical": false,
+          "source_id": "file"
+        },
+        {
+          "schema": 2,
+          "producer_id": "example",
+          "event_id": "2",
+          "agent": "claude",
+          "session_namespace": "local",
+          "session_id": "s",
+          "operation_id": "op",
+          "kind": "message.observed",
+          "data": {
+            "role": "assistant",
+            "stop_reason": "end_turn",
+            "has_tools": false
+          },
+          "id": 2,
+          "received_at": "2026-10-23T00:00:00Z",
+          "occurred_at": "2026-10-23T00:00:00Z",
+          "origin": "file",
+          "historical": false,
+          "source_id": "file"
+        }
+      ],
+      "state": "idle",
+      "confidence": "inferred"
+    },
+    {
+      "name": "pi_message_only",
+      "facts": [
+        {
+          "schema": 2,
+          "producer_id": "example",
+          "event_id": "1",
+          "agent": "pi",
+          "session_namespace": "local",
+          "session_id": "s",
+          "operation_id": "op",
+          "kind": "input.observed",
+          "data": {},
+          "id": 1,
+          "received_at": "2026-10-23T00:00:00Z",
+          "occurred_at": "2026-10-23T00:00:00Z",
+          "origin": "file",
+          "historical": false,
+          "source_id": "file"
+        },
+        {
+          "schema": 2,
+          "producer_id": "example",
+          "event_id": "2",
+          "agent": "pi",
+          "session_namespace": "local",
+          "session_id": "s",
+          "operation_id": "op",
+          "kind": "message.observed",
+          "data": {
+            "role": "assistant",
+            "stop_reason": "stop",
+            "has_tools": false
+          },
+          "id": 2,
+          "received_at": "2026-10-23T00:00:00Z",
+          "occurred_at": "2026-10-23T00:00:00Z",
+          "origin": "file",
+          "historical": false,
+          "source_id": "file"
+        }
+      ],
+      "state": "idle",
+      "confidence": "inferred"
+    },
+    {
+      "name": "truncated_message",
+      "facts": [
+        {
+          "schema": 2,
+          "producer_id": "example",
+          "event_id": "1",
+          "agent": "claude",
+          "session_namespace": "local",
+          "session_id": "s",
+          "operation_id": "op",
+          "kind": "message.observed",
+          "data": {
+            "role": "assistant",
+            "stop_reason": "max_tokens"
+          },
+          "id": 1,
+          "received_at": "2026-10-23T00:00:00Z",
+          "occurred_at": "2026-10-23T00:00:00Z",
+          "origin": "file",
+          "historical": false,
+          "source_id": "file"
+        }
+      ],
+      "state": "unknown",
+      "confidence": "inferred"
+    },
+    {
+      "name": "pending_tool",
+      "facts": [
+        {
+          "schema": 2,
+          "producer_id": "example",
+          "event_id": "1",
+          "agent": "pi",
+          "session_namespace": "local",
+          "session_id": "s",
+          "operation_id": "op",
+          "kind": "tool.observed",
+          "data": {
+            "call_id": "c",
+            "phase": "requested"
+          },
+          "id": 1,
+          "received_at": "2026-10-23T00:00:00Z",
+          "occurred_at": "2026-10-23T00:00:00Z",
+          "origin": "file",
+          "historical": false,
+          "source_id": "file"
+        },
+        {
+          "schema": 2,
+          "producer_id": "example",
+          "event_id": "2",
+          "agent": "pi",
+          "session_namespace": "local",
+          "session_id": "s",
+          "operation_id": "op",
+          "kind": "message.observed",
+          "data": {
+            "role": "assistant",
+            "stop_reason": "stop",
+            "has_tools": false
+          },
+          "id": 2,
+          "received_at": "2026-10-23T00:00:00Z",
+          "occurred_at": "2026-10-23T00:00:00Z",
+          "origin": "file",
+          "historical": false,
+          "source_id": "file"
+        }
+      ],
+      "state": "tool_activity",
+      "confidence": "inferred"
+    },
+    {
+      "name": "external_complete",
+      "facts": [
+        {
+          "schema": 2,
+          "producer_id": "example",
+          "event_id": "1",
+          "agent": "custom-agent",
+          "session_namespace": "local",
+          "session_id": "s",
+          "operation_id": "op",
+          "kind": "state.reported",
+          "data": {
+            "state": "completed"
+          },
+          "id": 1,
+          "received_at": "2026-10-23T00:00:00Z",
+          "occurred_at": "2026-10-23T00:00:00Z",
+          "origin": "external",
+          "historical": false,
+          "source_id": "external",
+          "reported_basis": "self_report"
+        }
+      ],
+      "state": "idle",
+      "confidence": "external",
+      "outcome": "completed"
+    }
+  ]
+}

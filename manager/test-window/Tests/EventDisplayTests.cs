@@ -7,30 +7,26 @@ namespace Tests;
 public sealed class EventDisplayTests
 {
     [TestMethod]
-    public void TerminalNotificationIsDistinctFromIdleStateWithTheSameOutcome()
+    public void RawLifecycleAndExternalNotificationHaveDistinctLabels()
     {
-        var session = new Session { State = "idle", Outcome = "completed" };
-        var ended = new ClientEvent(DateTimeOffset.UtcNow, "turn.ended", session, "");
-        var idle = ended with { Type = "state.changed" };
-        Assert.AreEqual("任务结束通知", Display.Event(ended.Type));
-        Assert.AreEqual("任务完成", Display.EventState(ended));
-        Assert.AreEqual("空闲", Display.EventState(idle));
-        StringAssert.Contains(Display.EventDescription(idle), "不是新的完成通知");
-        Assert.AreEqual("任务中断", Display.EventState(ended with { Session = session with { Outcome = "interrupted" } }));
-        Assert.AreEqual("任务失败", Display.EventState(ended with { Session = session with { Outcome = "failed" } }));
-        Assert.AreEqual("结束（结果未知）", Display.EventState(ended with { Session = session with { Outcome = "unknown" } }));
-        Assert.AreEqual("—", Display.EventState(ended with { Type = "snapshot", Session = null }));
-        Assert.AreEqual("idle", session.State);
+        var fact = new Fact { Kind="lifecycle.observed", Origin="external", OperationId="op", ReportedBasis="native_event",
+            Data=new(){Phase="ended",Scope="agent_turn",Outcome="completed"} };
+        var row = new ClientEvent(DateTimeOffset.UtcNow,"fact",null,"",fact,true,"completed");
+        Assert.AreEqual("任务完成（外部报告）",Display.EventState(row));
+        Assert.AreEqual("结束 / agent_turn",Display.EventState(row with { IsNotification=false }));
+        Assert.AreEqual("外部声明 / native_event",Display.Basis(fact));
+        StringAssert.Contains(Display.EventDescription(row),"本次任务结束通知");
+        Assert.AreEqual("任务失败",Display.EventState(row with { Fact=fact with {Origin="file"},NotificationOutcome="failed" }));
+        Assert.AreEqual("—",Display.EventState(row with { Type="snapshot",Fact=null,IsNotification=false }));
     }
 
     [TestMethod]
-    public void PiMessageEndAndStalenessExplainUnknownWithoutInventingCompletion()
+    public void InferredIdleAndExplicitOutcomeRemainDifferent()
     {
-        var candidate = new ClientEvent(DateTimeOffset.UtcNow, "state.changed",
-            new Session { Agent = "pi", State = "unknown", Reason = "message_end_without_settled_event" }, "");
-        Assert.AreEqual("未知", Display.EventState(candidate));
-        Assert.AreEqual("消息已结束，尚无整轮稳定结束证据", Display.EventDescription(candidate));
-        Assert.AreEqual("活动证据已过期，无法确认当前状态",
-            Display.EventDescription(candidate with { Session = candidate.Session! with { Reason = "stale_evidence" } }));
+        Assert.AreEqual("空闲（推断）",Display.SessionState(new(){State="idle",Confidence="inferred"}));
+        Assert.AreEqual("空闲",Display.SessionState(new(){State="idle",Confidence="observed",Outcome="completed"}));
+        StringAssert.Contains(Display.SessionOutcome(new(){Outcome="completed",Origin="external"}),"外部报告");
+        Assert.AreEqual("任务完成（外部报告）",Display.SessionOutcome(new(){Outcome="completed",Origin="external"}));
+        StringAssert.Contains(Display.FactDetail(new(DateTimeOffset.UtcNow,"fact",null,"",new(){ProducerId="source",OperationId="op",NativeType="native"})),"producer_id：source");
     }
 }

@@ -3,16 +3,44 @@ namespace AgentStatus.TestWindow.Core;
 public sealed class MonitorState
 {
     private readonly object gate = new();
-    private readonly Dictionary<string, Session> sessions = new();
+    private readonly Dictionary<string, EvidenceSession> ledgers = new();
     private readonly Queue<ClientEvent> events = new();
+    private readonly HashSet<string> endings = new();
+    private readonly Queue<string> endingOrder = new();
     private Cursor? cursor;
-    private long viewRevision;
-    private long version;
+    private long viewRevision, version;
+    private string snapshotCoverage = "complete";
+    private bool streamGap;
 
-    public StateView View()
+    public StateView View(DateTimeOffset? now = null)
     {
-        lock (gate) return new(sessions.Values.OrderBy(s => s.Agent).ThenBy(s => s.SessionId).ToArray(),
-            events.ToArray(), cursor, version);
+        lock (gate) return new(DefaultInterpreter.Project(ledgers.Values, now ?? DateTimeOffset.UtcNow), events.ToArray(), cursor, version,
+            streamGap || snapshotCoverage != "complete" || ledgers.Values.Any(s=>s.Coverage!="complete") ? "partial" : "complete");
+    }
+
+    private static void Validate(RuntimeSnapshot snapshot)
+    {
+        if (snapshot.Schema != 2 || string.IsNullOrWhiteSpace(snapshot.Epoch) || snapshot.Revision < 0 || snapshot.Sessions is null
+            || snapshot.Sessions.Any(s => s is null || string.IsNullOrWhiteSpace(s.SessionId) || string.IsNullOrWhiteSpace(s.SourceId)
+                || s.Facts is null || s.Facts.Any(f => f is null || f.Data is null || f.Schema != 2 || f.Id <= 0 || f.Id > snapshot.Revision)))
+            throw new InvalidDataException("不兼容的事实快照。");
+    }
+
+    private void Replace(RuntimeSnapshot snapshot)
+    {
+        ledgers.Clear();
+        foreach (var ledger in snapshot.Sessions) ledgers[ledger.Key] = ledger;
+        snapshotCoverage = snapshot.Coverage;
+        viewRevision = snapshot.Revision; version++;
+    }
+
+    private bool RememberEnd(Fact f)
+    {
+        string key = DefaultInterpreter.EndKey(f);
+        if (!endings.Add(key)) return false;
+        endingOrder.Enqueue(key);
+        while (endingOrder.Count > 32768) endings.Remove(endingOrder.Dequeue());
+        return true;
     }
 
     public bool Apply(SseMessage message)
@@ -22,66 +50,77 @@ public sealed class MonitorState
         {
             if (message.Type is "snapshot" or "reset")
             {
-                var snapshot = Wire.Read<RuntimeSnapshot>(message.Data);
-                if (snapshot.Schema != 1 || snapshot.Epoch != next.Epoch || snapshot.Revision != next.Revision || snapshot.Sessions is null)
-                    throw new InvalidDataException("不兼容的状态快照。");
-                if (cursor is not null && next.Epoch == cursor.Epoch &&
-                    (next.Revision <= cursor.Revision || next.Revision < viewRevision)) return false;
-                if (snapshot.Sessions.Any(s => s is null || string.IsNullOrWhiteSpace(s.SessionId)))
-                    throw new InvalidDataException("会话缺少标识。");
-                sessions.Clear();
-                foreach (var session in snapshot.Sessions)
-                {
-                    sessions[session.SessionId] = session;
-                }
+                var snapshot = Wire.Read<RuntimeSnapshot>(message.Data); Validate(snapshot);
+                if (snapshot.Epoch != next.Epoch || snapshot.Revision != next.Revision) throw new InvalidDataException("快照与游标不一致。");
+                if (cursor is not null && next.Epoch == cursor.Epoch && next.Revision <= cursor.Revision) return false;
+                if (cursor?.Epoch != next.Epoch) { endings.Clear(); endingOrder.Clear(); viewRevision = 0; }
+                if (next.Revision >= viewRevision) Replace(snapshot);
+                foreach (var fact in snapshot.Sessions.SelectMany(s => s.Facts)) if (DefaultInterpreter.EndOutcome(fact) is not null) RememberEnd(fact);
                 cursor = next;
-                viewRevision = next.Revision;
+                if (message.Type == "reset") streamGap = true;
                 Add(new(DateTimeOffset.UtcNow, message.Type, null, message.Type == "reset"
-                    ? "事件流已重置，缺失区间不可重放；已重新获取快照。"
-                    : $"建立快照：{sessions.Count} 个会话（不产生完成通知）。"));
+                    ? "事实流已重置，存在无法重放的区间；快照不生成完成通知。" : $"建立事实快照：{snapshot.Sessions.Length} 个来源会话（不产生完成通知）。"));
                 return true;
             }
-            if (cursor is null || next.Epoch != cursor.Epoch)
-                throw new InvalidDataException("事件流需要重新获取快照。");
-            if (next.Revision <= cursor.Revision) return false;
-            if (next.Revision != cursor.Revision + 1)
-                throw new InvalidDataException("事件序号存在间隙，需要重新获取快照。");
-            var update = Wire.Read<RuntimeEvent>(message.Data);
-            if (update.Id != next.Revision || update.Type != message.Type)
-                throw new InvalidDataException("事件内容与游标不一致。");
-            if (next.Revision > viewRevision && update.Session is { SourceHealth: not "superseded" } changed && !string.IsNullOrWhiteSpace(changed.SessionId))
-                sessions[changed.SessionId] = changed;
-            cursor = next;
-            viewRevision = Math.Max(viewRevision, next.Revision);
-            Add(new(DateTimeOffset.UtcNow, message.Type, update.Session, ""));
+            if (message.Type != "fact" || cursor is null || next.Epoch != cursor.Epoch || next.Revision != cursor.Revision + 1)
+            {
+                if (cursor is not null && next.Epoch == cursor.Epoch && next.Revision <= cursor.Revision) return false;
+                throw new InvalidDataException("事实流存在间隙，需要重新获取快照。");
+            }
+            var factUpdate = Wire.Read<Fact>(message.Data);
+            if (factUpdate.Schema != 2 || factUpdate.Id != next.Revision || factUpdate.Data is null || factUpdate.Origin is not ("file" or "external")
+                || string.IsNullOrWhiteSpace(factUpdate.SourceId) || string.IsNullOrWhiteSpace(factUpdate.SessionId))
+                throw new InvalidDataException("事实内容与协议不一致。");
+            if (next.Revision > viewRevision) ApplyFact(factUpdate);
+            if (factUpdate.SequenceGap) streamGap = true;
+            string? end = DefaultInterpreter.EndOutcome(factUpdate);
+            bool notification = end is not null && RememberEnd(factUpdate) && !factUpdate.Historical;
+            cursor = next; viewRevision = Math.Max(viewRevision, next.Revision);
+            Add(new(DateTimeOffset.UtcNow, "fact", null, "", factUpdate, notification, notification ? end : null));
             return true;
         }
     }
 
-    // The Runtime computes some metadata (idle freshness, source removal) only
-    // in snapshots. Reconcile without consuming the SSE cursor or notifications.
+    private void ApplyFact(Fact fact)
+    {
+        ledgers.TryGetValue(fact.LedgerKey, out var prior);
+        var facts = (prior?.Facts ?? []).Append(fact).ToArray();
+        string coverage = fact.SequenceGap ? "partial" : prior?.Coverage ?? "complete";
+        var incomplete=(prior?.IncompleteOperations??[]).ToHashSet();
+        if(fact.SequenceGap)incomplete.Add(string.IsNullOrEmpty(fact.OperationId)?"*":fact.OperationId);
+        var operations = facts.Reverse().Where(f => f.Kind is not ("source.heartbeat" or "source.health" or "session.observed")).Select(f => f.OperationId).Where(id => !string.IsNullOrEmpty(id)).Distinct().ToArray();
+        if (operations.Length > 32) coverage = "partial";
+        var allowed = operations.Take(32).ToHashSet();
+        var latest = new Dictionary<string,Fact>();
+        foreach (var f in facts.Where(f => string.IsNullOrEmpty(f.OperationId) || allowed.Contains(f.OperationId)))
+        {
+            string key = string.Join("\u001f",f.OperationId,f.Kind,f.Data.Scope);
+            if (f.Kind is "tool.observed" or "approval.observed")
+            {
+                string pair = key+"\u001fpair\u001f"+(f.Data.CallId??f.Data.RequestId);
+                if (f.Data.Phase is "finished" or "resolved") latest.Remove(pair); else latest[pair]=f;
+                key+="\u001flast";
+            }
+            else if(f.Kind=="lifecycle.observed") key+="\u001f"+f.Data.Phase;
+            else if(f.Kind=="source.heartbeat") key="source.heartbeat";
+            latest[key]=f;
+        }
+        facts=latest.Values.DistinctBy(f=>f.Id).OrderBy(f=>f.Id).ToArray();
+        if (facts.Length > 2048)
+        { foreach(var lost in facts[..^2048])incomplete.Add(string.IsNullOrEmpty(lost.OperationId)?"*":lost.OperationId); facts = facts[^2048..]; coverage = "partial"; }
+        if(incomplete.Count>33)incomplete=["*"];
+        ledgers[fact.LedgerKey] = new(fact.Agent, fact.SessionNamespace, fact.SessionId, fact.SourceId, fact.Origin, facts, coverage,incomplete.ToArray());
+    }
+
     public bool Reconcile(RuntimeSnapshot snapshot)
     {
+        Validate(snapshot);
         lock (gate)
         {
-            if (snapshot.Schema != 1 || snapshot.Sessions is null ||
-                snapshot.Sessions.Any(s => s is null || string.IsNullOrWhiteSpace(s.SessionId)))
-                throw new InvalidDataException("不兼容的状态快照。");
             if (cursor is null || snapshot.Epoch != cursor.Epoch || snapshot.Revision < viewRevision) return false;
-            sessions.Clear();
-            foreach (var session in snapshot.Sessions) sessions[session.SessionId] = session;
-            viewRevision = snapshot.Revision;
-            version++;
-            return true;
+            Replace(snapshot); return true;
         }
     }
-
     public void ClearEvents() { lock (gate) { events.Clear(); version++; } }
-
-    private void Add(ClientEvent entry)
-    {
-        events.Enqueue(entry);
-        while (events.Count > 500) events.Dequeue();
-        version++;
-    }
+    private void Add(ClientEvent entry) { events.Enqueue(entry); while (events.Count > 500) events.Dequeue(); version++; }
 }
