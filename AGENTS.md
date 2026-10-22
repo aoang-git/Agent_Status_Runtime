@@ -198,6 +198,7 @@ Claude Code 的创建者 Boris Cherny 将其团队的文件控制在约 100 行�
 
 - 首期优先实现无需修改 Agent 配置的文件被动监测；Hooks 安装、信任及其他配置增强留到后续适配。
 - 测试窗口只读现有 HTTP/SSE，不启动、停止或配置 Runtime；窗口集成测试必须使用独立临时 Runtime 和构造日志。
+- 展示 `turn.ended` 时使用结束通知及其结果，与 `state.changed` 的空闲状态分开；不得把同一次结束后的状态同步显示成第二次完成通知。
 - PowerShell 多步骤文件替换使用 `$ErrorActionPreference = 'Stop'`；更新后台程序前等待所属进程退出，并校验替换后的文件，避免失败后仍启动旧版本。
 
 ---

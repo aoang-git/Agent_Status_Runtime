@@ -164,7 +164,7 @@ public sealed class MainForm : Form
         tools.Controls.Add(clear);
         tools.Controls.Add(pauseScroll);
         tools.Controls.Add(new Label { Text = "最多保留最近 500 条；时间为客户端接收时间。", AutoSize = true, Padding = new(14, 6, 0, 0) });
-        Columns(eventsGrid, [("接收时间", 160), ("事件类型", 160), ("Agent", 100), ("会话 ID", 190), ("当前状态", 130), ("结束结果", 125), ("说明", 300)]);
+        Columns(eventsGrid, [("接收时间", 160), ("事件类型", 160), ("Agent", 100), ("会话 ID", 190), ("对外状态", 130), ("结束结果", 125), ("说明", 300)]);
         layout.Controls.Add(tools, 0, 0);
         layout.Controls.Add(eventsGrid, 0, 1);
         page.Controls.Add(layout);
@@ -285,9 +285,18 @@ public sealed class MainForm : Form
         int top = Math.Max(0, eventsGrid.FirstDisplayedScrollingRowIndex);
         eventsGrid.Rows.Clear();
         foreach (var e in view.Events)
-            eventsGrid.Rows.Add(Display.Time(e.ReceivedAt), Display.Event(e.Type), e.Session is { } s ? Display.Agent(s.Agent) : "—",
-                e.Session?.SessionId ?? "—", e.Session is { } state ? Display.State(state.State) : "—",
-                e.Type == "turn.ended" ? Display.Outcome(e.Session?.Outcome) : "—", e.Summary);
+        {
+            int index = eventsGrid.Rows.Add(Display.Time(e.ReceivedAt), Display.Event(e.Type), e.Session is { } s ? Display.Agent(s.Agent) : "—",
+                e.Session?.SessionId ?? "—", Display.EventState(e),
+                e.Type == "turn.ended" ? Display.Outcome(e.Session?.Outcome) : "—", Display.EventDescription(e));
+            if (e.Type == "turn.ended")
+            {
+                var style = eventsGrid.Rows[index].DefaultCellStyle;
+                style.ForeColor = style.SelectionForeColor = e.Session?.Outcome switch
+                { "completed" => Color.FromArgb(21, 100, 65), "failed" => Color.FromArgb(170, 30, 30), _ => Color.FromArgb(146, 64, 14) };
+                style.BackColor = Color.FromArgb(240, 247, 242);
+            }
+        }
         if (eventsGrid.Rows.Count > 0)
             eventsGrid.FirstDisplayedScrollingRowIndex = pauseScroll.Checked ? Math.Min(top, eventsGrid.Rows.Count - 1) : eventsGrid.Rows.Count - 1;
     }

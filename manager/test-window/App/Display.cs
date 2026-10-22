@@ -23,7 +23,25 @@ internal static class Display
     public static string Capability(string value) => value switch
     { "partial" => "部分支持", "unsupported" => "不支持", "unverified" => "尚未验证", "explicit_records_only" => "仅明确结束记录", "inferred_requests_only" => "仅审批请求推断", _ => Value(value) };
     public static string Event(string value) => value switch
-    { "snapshot" => "初始快照", "reset" => "流重置 / 事件间隙", "state.changed" => "状态变化", "turn.ended" => "回合结束", "source.degraded" => "来源降级", _ => Value(value) };
+    { "snapshot" => "初始快照", "reset" => "流重置 / 事件间隙", "state.changed" => "状态变化", "turn.ended" => "任务结束通知", "source.degraded" => "来源降级", _ => Value(value) };
+    public static string EventState(ClientEvent e) => e.Type != "turn.ended"
+        ? e.Session is { } session ? State(session.State) : "—"
+        : e.Session?.Outcome switch
+        { "completed" => "任务完成", "interrupted" => "任务中断", "failed" => "任务失败", _ => "结束（结果未知）" };
+    public static string EventDescription(ClientEvent e)
+    {
+        if (!string.IsNullOrWhiteSpace(e.Summary)) return e.Summary;
+        if (e.Type == "turn.ended") return "Agent 明确回合结束记录；这是结束通知。";
+        if (e.Type == "state.changed" && e.Session?.State == "idle") return "当前为空闲；状态同步，不是新的完成通知。";
+        return Reason(e.Session?.Reason);
+    }
+    public static string Reason(string? value) => value switch
+    {
+        "message_end_without_settled_event" => "消息已结束，尚无整轮稳定结束证据",
+        "message_end_without_turn_boundary" => "消息已结束，尚无明确回合结束边界",
+        "stale_evidence" => "活动证据已过期，无法确认当前状态",
+        _ => Value(value)
+    };
     public static Color StateColor(string value) => value switch
     { "working" => Color.FromArgb(29, 78, 216), "tool_activity" => Color.FromArgb(109, 40, 217), "waiting_confirmation" => Color.FromArgb(146, 64, 14), "idle" => Color.FromArgb(21, 100, 65), _ => Color.FromArgb(92, 104, 122) };
 
@@ -57,7 +75,7 @@ internal static class Display
         可信度：{Confidence(s.Confidence)}
         证据新鲜度：{Freshness(s.Freshness)}
         结束结果：{Outcome(s.Outcome)}
-        判断原因：{Value(s.Reason)}
+        判断原因：{Reason(s.Reason)}
         更新时间：{Time(s.UpdatedAt)}
         来源健康：{Health(s.SourceHealth)}
 
