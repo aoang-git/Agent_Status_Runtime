@@ -100,3 +100,5 @@ git push origin v0.3.0
 ```
 
 仓库需允许 GitHub Actions 运行本工作流；发布使用内置 `GITHUB_TOKEN` 的 `contents: write` 权限，无需配置个人访问令牌。标签须包含此工作流文件。Release 产物从该标签的源码重新构建，不会上传本机的 bin、运行数据或连接凭据。下载新版安装器重复运行即可原位更新核心；下载的安装器在安装成功后可删除。
+
+标签已上传但 Actions 没有运行记录时，可手动启动：将包含手动入口的工作流提交、推送到默认分支，打开 **Actions → Release Windows executables → Run workflow**，分支选择 `main`，在 `tag` 中填写已有版本标签（例如 `v0.3.0`），点击运行。此时仍检出并构建该标签对应的代码；无需删除或移动标签。手动与自动发布同一版本时使用同一个并发组，已存在的 Release 仍不覆盖。只有源码 zip/tar.gz 不代表构建成功；应查看工作流日志和 Release 中的 exe 附件。
