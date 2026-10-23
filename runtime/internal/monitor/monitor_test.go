@@ -50,17 +50,16 @@ func appendFile(t *testing.T, path string, b []byte) {
 		t.Fatal(err)
 	}
 }
-func fixtureEngine(t *testing.T, agent string) (*Engine, string, string) {
+func fixtureEngine(t *testing.T, agent string) (*Engine, string) {
 	t.Helper()
 	root := t.TempDir()
-	db := filepath.Join(t.TempDir(), "facts.sqlite")
 	s := NewStore()
 	e, err := NewEngine(s, []Root{{agent, root}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	now = time.Now().UTC()
-	return e, root, db
+	return e, root
 }
 func scan(t *testing.T, e *Engine) {
 	t.Helper()
@@ -165,7 +164,7 @@ func TestPublishedOutputConformsToSchema(t *testing.T) {
 }
 
 func TestIncrementalPartialRestartAndBaseline(t *testing.T) {
-	e, root, _ := fixtureEngine(t, "codex")
+	e, root := fixtureEngine(t, "codex")
 	p := filepath.Join(root, "x.jsonl")
 	write(t, p, header("one")+codex("task_started", "old", 0)+codex("task_complete", "old", 1))
 	scan(t, e)
@@ -197,7 +196,7 @@ func TestIncrementalPartialRestartAndBaseline(t *testing.T) {
 }
 
 func TestNativeOldUnattributedAndFailedEndsRemainFacts(t *testing.T) {
-	e, root, _ := fixtureEngine(t, "codex")
+	e, root := fixtureEngine(t, "codex")
 	p := filepath.Join(root, "x.jsonl")
 	write(t, p, header("one")+codex("task_started", "a", 0))
 	scan(t, e)
@@ -220,7 +219,7 @@ func TestNativeOldUnattributedAndFailedEndsRemainFacts(t *testing.T) {
 }
 
 func TestNewLiveFileAndInvalidNativeMetadata(t *testing.T) {
-	e, root, _ := fixtureEngine(t, "codex")
+	e, root := fixtureEngine(t, "codex")
 	scan(t, e)
 	p := filepath.Join(root, "short.jsonl")
 	write(t, p, header("short")+codex("task_started", "one", 0)+codex("task_complete", "one", 1))
@@ -247,7 +246,7 @@ func TestNewLiveFileAndInvalidNativeMetadata(t *testing.T) {
 func TestClaudePiRetainStopReasonsWithoutInventingRunEnd(t *testing.T) {
 	for _, agent := range []string{"claude", "pi"} {
 		t.Run(agent, func(t *testing.T) {
-			e, root, _ := fixtureEngine(t, agent)
+			e, root := fixtureEngine(t, agent)
 			p := filepath.Join(root, "s.jsonl")
 			if agent == "claude" {
 				write(t, p, `{"type":"user","sessionId":"one","uuid":"u","message":{"content":"SECRET_PROMPT"}}`+"\n")
@@ -275,7 +274,7 @@ func TestClaudePiRetainStopReasonsWithoutInventingRunEnd(t *testing.T) {
 }
 
 func TestDeepseekFrameBatchSeedApprovalAndRecovery(t *testing.T) {
-	e, root, _ := fixtureEngine(t, "deepseek")
+	e, root := fixtureEngine(t, "deepseek")
 	p := filepath.Join(root, "session.v3.jsonl.zstd")
 	write(t, p, "")
 	appendFile(t, p, frame(t, `{"type":"session","version":3,"id":"one","isSeeded":true}`+"\n"+dsh("turn/start", `{"turn":5}`, 0)+dsh("turn/end", `{"turn":5,"reason":{"kind":"completed"}}`, 1)+dsh("session/end-seed", `{"inherited":true}`, 2)))
@@ -303,7 +302,7 @@ func TestDeepseekFrameBatchSeedApprovalAndRecovery(t *testing.T) {
 }
 
 func TestRebuildCorruptionAndGenerationIsolation(t *testing.T) {
-	e, root, _ := fixtureEngine(t, "codex")
+	e, root := fixtureEngine(t, "codex")
 	p := filepath.Join(root, "x.jsonl")
 	write(t, p, header("one"))
 	scan(t, e)
@@ -313,7 +312,7 @@ func TestRebuildCorruptionAndGenerationIsolation(t *testing.T) {
 	if len(liveEnds(t, e)) != 0 {
 		t.Fatal("replacement history notified")
 	}
-	d, dir, _ := fixtureEngine(t, "deepseek")
+	d, dir := fixtureEngine(t, "deepseek")
 	write(t, filepath.Join(dir, "session.v3.jsonl"), "{\"type\":\"session\",\"version\":3,\"id\":\"d\"}\n")
 	scan(t, d)
 	write(t, filepath.Join(dir, "session.v4.jsonl"), "{\"type\":\"session\",\"version\":4,\"id\":\"d\"}\n")
@@ -386,7 +385,7 @@ func TestExternalIdempotencyProvenanceAndBounds(t *testing.T) {
 }
 
 func TestHTTPScopesAndLiveOnlySSE(t *testing.T) {
-	e, _, _ := fixtureEngine(t, "codex")
+	e, _ := fixtureEngine(t, "codex")
 	handler := Handler(e, "READ_SECRET", "WRITE_SECRET")
 	report := `{"schema":3,"producer_id":"p","event_id":"1","agent":"pi","session_id":"s","operation_id":"r","state":"working","reported_basis":"native_event"}`
 	for _, test := range []struct {
@@ -471,7 +470,7 @@ func TestLeaseFrameBoundsAndWatcher(t *testing.T) {
 	if _, err := readUnits(f, 0, maxLine+1); err == nil {
 		t.Fatal("unbounded line")
 	}
-	e, root, _ := fixtureEngine(t, "codex")
+	e, root := fixtureEngine(t, "codex")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- e.Run(ctx, 250*time.Millisecond) }()
@@ -517,7 +516,7 @@ func TestByteBoundsWakeAndCancellation(t *testing.T) {
 }
 
 func TestExternalDiagnosticsKeepAmbiguousNamesSeparate(t *testing.T) {
-	e, _, _ := fixtureEngine(t, "codex")
+	e, _ := fixtureEngine(t, "codex")
 	for i, pair := range [][2]string{{"ab", "c"}, {"a", "bc"}} {
 		f := input(fmt.Sprint(i))
 		f.Agent, f.Namespace = pair[0], pair[1]
@@ -535,7 +534,7 @@ func TestExternalDiagnosticsKeepAmbiguousNamesSeparate(t *testing.T) {
 }
 
 func TestRebuildThenAppendAndDelayedNativeTimeRemainLive(t *testing.T) {
-	e, root, _ := fixtureEngine(t, "codex")
+	e, root := fixtureEngine(t, "codex")
 	p := filepath.Join(root, "x.jsonl")
 	write(t, p, header("original"))
 	scan(t, e)
@@ -549,7 +548,7 @@ func TestRebuildThenAppendAndDelayedNativeTimeRemainLive(t *testing.T) {
 	}
 }
 func TestMissingSourceExpiresAndStoredInputsAreImmutable(t *testing.T) {
-	e, root, _ := fixtureEngine(t, "codex")
+	e, root := fixtureEngine(t, "codex")
 	p := filepath.Join(root, "x.jsonl")
 	write(t, p, header("one"))
 	scan(t, e)
@@ -575,7 +574,7 @@ func TestMissingSourceExpiresAndStoredInputsAreImmutable(t *testing.T) {
 }
 
 func TestConcurrentHealthReadsAndStreamExpiry(t *testing.T) {
-	e, _, _ := fixtureEngine(t, "codex")
+	e, _ := fixtureEngine(t, "codex")
 	_, _, _ = e.Store.Ingest(context.Background(), input("health"))
 	done := make(chan bool, 20)
 	for i := 0; i < 20; i++ {
@@ -627,7 +626,7 @@ func TestDiagnosticLogRotation(t *testing.T) {
 }
 
 func TestRecreatedDirectoryRestoresNotificationsWithoutPolling(t *testing.T) {
-	e, root, _ := fixtureEngine(t, "codex")
+	e, root := fixtureEngine(t, "codex")
 	dir := filepath.Join(root, "nested")
 	p := filepath.Join(dir, "x.jsonl")
 	write(t, p, header("old"))

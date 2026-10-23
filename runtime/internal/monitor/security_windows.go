@@ -5,7 +5,7 @@ package monitor
 import "golang.org/x/sys/windows"
 
 // Protect the runtime-owned directory, including inherited permissions for the
-// SQLite database and connection token. Never call this on an Agent directory.
+// connection credentials and diagnostic logs. Never call this on an Agent directory.
 func ProtectDirectory(path string) error {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {

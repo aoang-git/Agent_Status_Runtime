@@ -242,7 +242,7 @@ internal sealed class TempDirectory : IDisposable
     public TempDirectory() => Directory.CreateDirectory(Path);
     public void Dispose()
     {
-        // Windows can briefly retain SQLite mappings after the fixture process
+        // Windows can briefly retain file handles after the fixture process
         // exits. Retry only cleanup of this uniquely owned temporary directory.
         var expectedPrefix=System.IO.Path.Combine(System.IO.Path.GetTempPath(),"agent-status-window-");
         if(!System.IO.Path.GetFullPath(Path).StartsWith(expectedPrefix,StringComparison.OrdinalIgnoreCase))

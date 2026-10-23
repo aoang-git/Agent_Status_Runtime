@@ -1,104 +1,66 @@
 # Agent Status Runtime
 
-轻量本机实时监测与广播服务，版本 **0.3.0 / schema 3**。核心在本次运行期间观察默认四类 Agent 的文件变化，或接收第三方插件的标准状态报告，通过 HTTP/SSE 广播。
+轻量的本机 Agent 实时监测与广播服务。面向需要持续获取 Agent 活动状态的桌面上位机、状态指示器和其它本机消费者。
 
-核心不判断最终显示状态，不保存活动数据库，不恢复旧任务。正式设备上位机尚未开发；测试窗口用于分析来源和验证客户端规则。
+## 功能介绍
 
-## Windows 安装
+核心在后台观察 Codex、Claude Code、DeepSeek DSH 和 Pi 的新活动，也接收其它 Agent 插件主动上报的标准状态，再通过本机 HTTP/SSE 提供给消费者。核心保留事件来源和上报依据，显示什么状态、何时结束计时，由客户端决定。
 
-双击 `bin/agent-status-setup.exe`，无需 Go、.NET 或管理员权限。安装到当前用户的 `%LOCALAPPDATA%\Programs\AgentStatusRuntime`；运行目录为 `%APPDATA%\AgentStatusRuntime`。
+Windows 用户可从 [Releases](https://github.com/aoang-git/Agent_Status_Runtime/releases) 下载并双击 `agent-status-setup.exe`。安装后立即后台运行，当前用户登录时自动启动，意外退出后由计划任务补启动。更新时运行新版安装器即可，安装成功后可删除下载的安装器。
 
-安装器注册当前用户计划任务：登录启动、每分钟补启动、忽略重复实例、允许电池运行、没有执行时限。首次安装立即启动，后台不弹控制台。策略禁止任务注册时显示具体错误，不自动提权。
+`agent-status-test.exe` 是单独交付的只读开发工具，用于查看采集来源、事实和通知，验证“来源＋状态＋持续时间”的显示规则。它不会启动或控制核心。正式硬件上位机、串口输出和局域网设备转发尚未实现。Linux/macOS 目前支持手动构建和运行。
 
-维护命令（安装后的核心程序）：
+安装位置、维护命令、构建测试和自动发布操作见 [运行与开发](doc/运行与开发.md)。
 
-```powershell
-& "$env:LOCALAPPDATA/Programs/AgentStatusRuntime/agent-statusd.exe" stop
-& "$env:LOCALAPPDATA/Programs/AgentStatusRuntime/agent-statusd.exe" start
-& "$env:LOCALAPPDATA/Programs/AgentStatusRuntime/agent-statusd.exe" restart
-& "$env:LOCALAPPDATA/Programs/AgentStatusRuntime/agent-statusd.exe" uninstall
+## 监控实现方式和局限性
+
+默认监测依靠 Agent 自身写入本地的会话记录。文件监听配合增量读取、定期检查和新目录发现，将消息、工具、审批及生命周期记录转换为不含正文的事实；内置监测没有安装生命周期 Hook，也不修改 Agent 配置。
+
+```mermaid
+flowchart LR
+  Files[四类 Agent 的本地记录] --> Parse[监听与事实解析]
+  Plugin[其它 Agent 的原生 Hook 插件] --> Validate[标准状态校验]
+  Parse --> Queue[有界内存队列]
+  Validate --> Queue
+  Queue --> Stream[本机 HTTP / SSE]
+  Stream --> Client[测试窗口或独立上位机]
+  Client --> Display[解释状态并决定显示]
 ```
 
-停止会先禁用补启动；启动重新启用。重复运行安装器原位更新。卸载只移除自身程序和计划任务，保留诊断数据，不修改 Agent 目录。
+核心只广播本次运行期间观察到的新变化。启动时为已有记录建立基线，客户端重连后等待新活动，不恢复旧任务。事实、去重和采集关联只在内存中短期保存；落盘限于连接发现、诊断日志及部署信息，不保存对话正文、提示词、工具参数或结果。
 
-## 开发运行与测试窗口
+使用时需要了解这些边界：
 
-```powershell
-./scripts/build.ps1 -Test
-./bin/agent-statusd.exe serve --data-dir ./.runtime/live
-./bin/agent-statusd.exe doctor --data-dir ./.runtime/live
-./bin/agent-statusd.exe watch --data-dir ./.runtime/live
-./bin/agent-statusd.exe status --data-dir ./.runtime/live
-./scripts/build-test-window.ps1 -Test
-./bin/agent-status-test.exe
-```
+- 文件写入存在延迟；能观察到某条记录，不等于能持续知道 Agent 内部的即时状态。没有持久化记录、格式变化或读取权限不足时，覆盖会受限。
+- 同一种 Agent 的 CLI 和桌面入口不保证使用相同格式。当前有四类格式解析和构造样本回归，尚未完成所有版本、桌面入口、远程和 WSL 场景的实机兼容验证。
+- 消息结束和工具返回不能直接证明整个任务成功。测试窗口结合明确结束记录、待处理工具/审批及无进展超时做判断，推断仅作为边界保护。
+- 缓存有界，服务重启、断连或消费者落后可能丢失中间变化；这里不提供历史回放、离线补发或必达保证。
+- 核心目前只监听本机回环地址。ESP32 等局域网设备不能直接连接，需要后续上位机转发；当前用户注销、电脑休眠或关机期间不提供监测。
 
-`status` 输出近期诊断记录；`watch` 订阅建立后的新增记录。窗口只读服务，不启动、停止或配置核心。默认优先使用用户安装服务的运行目录；没有用户连接文件时，才发现带有新版连接文件的项目 `.runtime/live`。也可显式指定或选择目录；旧连接文件不作兼容读取。
+测试窗口按接收顺序只显示最新一个轮次。工作、工具和审批切换不会重置任务计时；结束通知短暂展示后清除。更详细的通信及客户端规则见 [接入协议](doc/接入协议.md)。
 
-默认监听 `127.0.0.1:9120`，占用时自动选择空闲端口；显式 `--listen` 不自动换端口。Linux/macOS 使用对应产物手动运行，不提供本轮自动安装。
+## 性能评估
 
-## 内置来源
+2026-10-23 对 Windows 核心进行了一次约 **1.8 小时**的阶段性测试：单个构造来源每约 5 秒追加一条记录，同时保持一个 SSE 订阅者。期间采集到 104 组资源样本，接收到 1237 条事实广播。
 
-| Agent | 默认发现 | 观察内容 |
-|---|---|---|
-| Codex | CODEX_HOME 或 ~/.codex 下 sessions | 输入、消息、工具及原生回合边界 |
-| Claude Code | CLAUDE_CONFIG_DIR 或 ~/.claude 下 projects | 输入、消息停止原因和工具 |
-| DeepSeek DSH | DSH_HOME 或 ~/.dsh 下 sessions | v3/v4 JSONL/Zstd、工具、审批及回合边界 |
-| Pi | PI_CODING_AGENT_SESSION_DIR 或 ~/.pi/agent/sessions | v3 JSONL、消息停止原因、工具及持久化分支变化 |
+| 指标 | 本次观察 |
+|---|---|
+| CPU 占整机计算能力 | 样本平均约 0.010%，最高约 0.50%（包含启动阶段） |
+| 工作集 | 约 13.1–17.7 MiB |
+| 私有字节 | 约 47.3–51.6 MiB |
+| 进程句柄 | 172–207，后期样本保持 207 |
+| 近期队列 | 预热后约 115 条、67 KiB，旧记录持续淘汰 |
 
-目录不存在时正常待机，出现后自动接入。自定义目录可使用重复 `--root agent=path`（替代自动根目录）。不修改 Agent 配置，不加载插件；远程/WSL 文件和无持久化会话不自动覆盖。桌面版本兼容性仍需独立验证。
+这是单来源、低频负载的初步结果，不代表大量会话或高并发下的性能，也不包含测试窗口的资源消耗。72 小时长稳测试尚未完成，不能据此声称已通过长期稳定性验收。
 
-启动已有文件只建立基线，不广播旧活动。半行/半帧不提前推进；截断、替换、继承记录不伪造新完成。原生时间不重排实际接收顺序。
+环境、统计口径、复测方法和缺少的验证见 [性能评估](doc/性能评估.md)；已有功能验证见 [验证记录](doc/验证记录.md)。
 
-## 第三方接入
+## 其它 Agent 上报插件接入说明
 
-第三方只报告标准状态，不发送原始消息或工具事件。例如：
+其它 Agent 可以在自身原生扩展或 Hook 中，把实际运行进展转换为标准状态上报。插件运行在 Agent 一侧，监测核心只负责校验、标记来源和转发，不安装、加载或执行插件。
 
-```json
-{"schema":3,"producer_id":"pi-status","event_id":"event-1","agent":"pi","session_id":"session-1","operation_id":"run-1","state":"working","reported_basis":"native_event"}
-```
+插件应表达“正在工作、工具活动、等待确认、空闲、完成、中断、失败或未知”，并注明依据来自原生事件、插件推断还是普通自报。每轮使用稳定的操作标识，只在状态变化或真实进展时报告；定时心跳不能冒充任务进展，空闲也不等同于任务成功。
 
-状态包括 working、tool_activity、waiting_confirmation、idle、completed、interrupted、failed、unknown。活动和结束状态需要稳定 operation_id；idle 不等于成功。reported_basis 区分 native_event、inferred、self_report，属于来源声明。
+优先使用工具提供的确定性原生回调，不依赖模型记得执行上报命令。工具调用失败可能随后重试，消息结束后也可能继续自动处理，插件需要先确认原生事件的实际含义。报告失败不得拖慢或中断 Agent 本身。
 
-生成工具专用接入提示词：
-
-```powershell
-./bin/agent-statusd.exe integration-prompt --data-dir ./.runtime/live
-```
-
-插件根据所用版本的原生 Hook 转换状态；不依赖模型记得发送命令，不用定时工作状态冒充实际进展。Pi 的 agent_end 后可能自动继续，应核对 agent_settled 等真实稳定边界。本仓库本轮不提供具体 Pi 插件。
-
-完整字段、HTTP/SSE 行为及限制见 [接入协议](doc/v0.3接入协议.md)。
-
-## 内存与显示规则
-
-近期队列最多 4096 条 / 8 MiB / 10 分钟；上报去重最多 10000 条 / 10 分钟；流序号最多 4096 个 / 闲置 1 小时；文件上下文最多 4096 个，失效 1 小时淘汰。超限明确降级或报告缺口。服务退出即丢弃活动数据，无离线补报队列。
-
-只落盘连接发现文件、操作系统锁和最多两份各 1 MiB 的诊断日志。连接文件只允许当前用户和 SYSTEM 访问；读写令牌分离，每次启动轮换。API 仅 loopback，不支持浏览器跨域。正文、工具参数和输出不进入广播或日志。
-
-测试窗口所有来源严格最新优先，只显示一个轮次，依据强弱不锁定来源。活动/工具/审批切换不重置计时；普通 5 分钟、审批 30 分钟无有效活动时保底结束，心跳和未知不续期。文件正常消息结束无工具、审批或已知缺口时保留 3 秒推断。结束通知 10 秒后清除，后续活动另起一轮。ready、gap、重连和 recent 不恢复顶部活动。
-
-## 验证与交付
-
-`scripts/test-install.ps1` 在仓库专属隔离目录和独立任务下验证安装、重装、启停、强杀恢复、卸载，不覆盖已有安装。
-
-`scripts/soak.ps1` 使用独立 Runtime 和构造记录进行固定负载运行，默认 72 小时，输出资源及健康 CSV，不操作真实 Agent 记录。验证进度以实际采样为准；详见 [v0.3 验证记录](doc/v0.3验证记录.md)。
-
-构建产物统一在 bin，每个程序和目标平台只保留最新版。构建核验后关闭占用输出的本项目进程，原位构建并恢复实例；临时发布和内嵌载荷构建后清理。
-
-## GitHub Releases 自动发布
-
-[发布工作流](.github/workflows/release.yml) 在推送 `v*` 标签时运行。使用 Windows x64 Runner，先校验标签与 `runtime/internal/monitor/model.go` 的 `Version` 完全一致，再执行 Go 测试、go vet、核心及安装器构建、窗口测试（包含真实临时 Runtime 集成）和自包含窗口构建。
-
-全部成功后自动发布 Release，附件仅包含 `agent-status-setup.exe`、`agent-status-test.exe` 和 `SHA256SUMS.txt`。安装器内嵌同次构建的核心，窗口无需额外安装 .NET。`v0.3.1-rc.1` 等带后缀标签自动标为预发布，不设为 Latest；正式版本使用 GitHub 默认的 Latest 判定。发布前的构建失败可在 Actions 页面重跑；已存在的 Release 不覆盖。如果附件上传中断留下草稿，先在 Releases 页面检查并删除该未发布草稿，再重跑。已正式发布版本的修复使用新版本标签。
-
-先修改版本号并提交需要发布的全部代码，将提交推送到 GitHub，再创建、推送对应标签。例如发布当前 `0.3.0`：
-
-```powershell
-git tag -a v0.3.0 -m "Release v0.3.0"
-git push origin v0.3.0
-```
-
-仓库需允许 GitHub Actions 运行本工作流；发布使用内置 `GITHUB_TOKEN` 的 `contents: write` 权限，无需配置个人访问令牌。标签须包含此工作流文件。Release 产物从该标签的源码重新构建，不会上传本机的 bin、运行数据或连接凭据。下载新版安装器重复运行即可原位更新核心；下载的安装器在安装成功后可删除。
-
-标签已上传但 Actions 没有运行记录时，可手动启动：将包含手动入口的工作流提交、推送到默认分支，打开 **Actions → Release Windows executables → Run workflow**，分支选择 `main`，在 `tag` 中填写已有版本标签（例如 `v0.3.0`），点击运行。此时仍检出并构建该标签对应的代码；无需删除或移动标签。手动与自动发布同一版本时使用同一个并发组，已存在的 Release 仍不覆盖。只有源码 zip/tar.gz 不代表构建成功；应查看工作流日志和 Release 中的 exe 附件。
+所有来源按核心接收顺序广播；插件声明依据更明确，也不会锁住来源或覆盖后到的文件活动。接入步骤、字段、可运行上报示例和验收要求见 [插件开发](doc/插件开发.md)，完整通信约定见 [接入协议](doc/接入协议.md)。
