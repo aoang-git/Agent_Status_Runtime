@@ -85,3 +85,18 @@
 `scripts/soak.ps1` 使用独立 Runtime 和构造记录进行固定负载运行，默认 72 小时，输出资源及健康 CSV，不操作真实 Agent 记录。验证进度以实际采样为准；详见 [v0.3 验证记录](doc/v0.3验证记录.md)。
 
 构建产物统一在 bin，每个程序和目标平台只保留最新版。构建核验后关闭占用输出的本项目进程，原位构建并恢复实例；临时发布和内嵌载荷构建后清理。
+
+## GitHub Releases 自动发布
+
+[发布工作流](.github/workflows/release.yml) 在推送 `v*` 标签时运行。使用 Windows x64 Runner，先校验标签与 `runtime/internal/monitor/model.go` 的 `Version` 完全一致，再执行 Go 测试、go vet、核心及安装器构建、窗口测试（包含真实临时 Runtime 集成）和自包含窗口构建。
+
+全部成功后自动发布 Release，附件仅包含 `agent-status-setup.exe`、`agent-status-test.exe` 和 `SHA256SUMS.txt`。安装器内嵌同次构建的核心，窗口无需额外安装 .NET。`v0.3.1-rc.1` 等带后缀标签自动标为预发布，不设为 Latest；正式版本使用 GitHub 默认的 Latest 判定。发布前的构建失败可在 Actions 页面重跑；已存在的 Release 不覆盖。如果附件上传中断留下草稿，先在 Releases 页面检查并删除该未发布草稿，再重跑。已正式发布版本的修复使用新版本标签。
+
+先修改版本号并提交需要发布的全部代码，将提交推送到 GitHub，再创建、推送对应标签。例如发布当前 `0.3.0`：
+
+```powershell
+git tag -a v0.3.0 -m "Release v0.3.0"
+git push origin v0.3.0
+```
+
+仓库需允许 GitHub Actions 运行本工作流；发布使用内置 `GITHUB_TOKEN` 的 `contents: write` 权限，无需配置个人访问令牌。标签须包含此工作流文件。Release 产物从该标签的源码重新构建，不会上传本机的 bin、运行数据或连接凭据。下载新版安装器重复运行即可原位更新核心；下载的安装器在安装成功后可删除。

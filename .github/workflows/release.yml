@@ -1,0 +1,90 @@
+name: Release Windows executables
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      GOOS: windows
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate release version
+        run: |
+          if ($env:RELEASE_TAG -cnotmatch '\Av(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\z') {
+            throw 'Release tags must use vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-suffix.'
+          }
+          $source = Get-Content -Raw -LiteralPath runtime/internal/monitor/model.go
+          $version = [regex]::Match($source, '(?m)^const Version = "([^"]+)"\r?$')
+          if (-not $version.Success -or $version.Groups[1].Value -cne $env:RELEASE_TAG.Substring(1)) {
+            throw 'The release tag must match monitor.Version in runtime/internal/monitor/model.go.'
+          }
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: runtime/go.mod
+          cache: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Test and build core and installer
+        run: ./scripts/build.ps1 -Test
+
+      - name: Test and build self-contained test window
+        run: ./scripts/build-test-window.ps1 -Test
+
+      - name: Check release files and generate checksums
+        run: |
+          $assets = @('agent-status-setup.exe', 'agent-status-test.exe')
+          $checksums = foreach ($name in $assets) {
+            $path = Join-Path bin $name
+            $file = Get-Item -LiteralPath $path -ErrorAction Stop
+            if ($file.Length -lt 1024) { throw "Invalid release file: $name" }
+            $header = [byte[]]::new(2)
+            $stream = [IO.File]::OpenRead($file.FullName)
+            try {
+              if ($stream.Read($header, 0, 2) -ne 2 -or [Text.Encoding]::ASCII.GetString($header) -cne 'MZ') {
+                throw "Not a Windows executable: $name"
+              }
+            } finally { $stream.Dispose() }
+            '{0}  {1}' -f (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant(), $name
+          }
+          Set-Content -LiteralPath bin/SHA256SUMS.txt -Value $checksums -Encoding utf8NoBOM
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $assets = @('bin/agent-status-setup.exe', 'bin/agent-status-test.exe', 'bin/SHA256SUMS.txt')
+          $arguments = @('release', 'create', $env:RELEASE_TAG, '--verify-tag', '--title', $env:RELEASE_TAG, '--generate-notes')
+          if ($env:RELEASE_TAG.Contains('-')) { $arguments += @('--prerelease', '--latest=false') }
+          & gh @arguments @assets
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub Release publication failed; existing releases are never overwritten.' }
