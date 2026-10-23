@@ -67,7 +67,7 @@ public sealed record FactData
 }
 public sealed record Fact
 {
-    public int Schema { get; init; } = 2;
+    public int Schema { get; init; } = 3;
     public long Id { get; init; }
     public string ProducerId { get; init; } = "";
     public string EventId { get; init; } = "";
@@ -96,10 +96,13 @@ public sealed record EvidenceSession(string Agent, string SessionNamespace, stri
 {
     [JsonIgnore] public string Key => string.Join("\u001f", SourceId, Agent, SessionNamespace, SessionId);
 }
-public sealed record RuntimeSnapshot(int Schema, string Epoch, long Revision, EvidenceSession[] Sessions, string Coverage = "complete");
+public sealed record StreamBoundary(int Schema, string Epoch, long Revision);
+public sealed record RecentFacts(int Schema, string Epoch, long Revision, Fact[] Facts, ulong Dropped = 0);
 public sealed record RuntimeInfo(string Version, int Schema, string Mode, string Epoch);
 public sealed record SourceStatus(string Id, string Agent, string Health, string? Reason, int? Format, string? SessionNamespace = null, string Origin = "file");
-public sealed record Health(Dictionary<string, string> Roots, SourceStatus[] Sources, string Watcher);
+public sealed record Health(Dictionary<string, string> Roots, SourceStatus[] Sources, string Watcher,
+    DateTimeOffset StartedAt = default, DateTimeOffset LastScanAt = default, long ScanMilliseconds = 0,
+    bool CapacityExceeded = false, Dictionary<string, JsonElement>? Queue = null);
 public sealed record Capability
 {
     public string Agent { get; init; } = "";

@@ -3,140 +3,103 @@ namespace AgentStatus.TestWindow.Core;
 public sealed class MonitorState
 {
     private readonly object gate = new();
-    private readonly Dictionary<string, EvidenceSession> ledgers = new();
+    private readonly Queue<Fact> facts = new();
     private readonly Queue<ClientEvent> events = new();
-    private readonly HashSet<string> endings = new();
-    private readonly Queue<string> endingOrder = new();
     private readonly LatestActivity activity = new();
-    private bool monitoring;
     private Cursor? cursor;
-    private long viewRevision, version;
-    private string snapshotCoverage = "complete";
-    private bool streamGap;
+    private string? diagnosticEpoch;
+    private long version;
+    private bool monitoring, incomplete;
+    private int bytes;
+    private readonly Dictionary<string, DateTimeOffset> incompleteOperations = new();
+    private void Lost(Fact fact)
+    {
+        string key = fact.LedgerKey + "\u001f" + fact.OperationId;
+        incompleteOperations[key] = fact.ReceivedAt;
+        if (incompleteOperations.Count > 4096) incompleteOperations.Remove(incompleteOperations.MinBy(p => p.Value).Key);
+    }
 
+    private void Retain(Fact fact)
+    {
+        if (facts.Any(f => f.Id == fact.Id)) return;
+        facts.Enqueue(fact); bytes += System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(fact, Wire.Json).Length;
+        while (facts.Count > 4096 || bytes > 8 * 1024 * 1024 || facts.TryPeek(out var first) && fact.ReceivedAt - first.ReceivedAt >= TimeSpan.FromMinutes(10))
+        { var removed = facts.Dequeue(); bytes -= System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(removed, Wire.Json).Length; Lost(removed); incomplete = true; }
+    }
     public StateView View(DateTimeOffset? now = null)
     {
         lock (gate)
         {
             var time = now ?? DateTimeOffset.UtcNow;
+            while (facts.TryPeek(out var first) && time - first.ReceivedAt >= TimeSpan.FromMinutes(10))
+            { var removed = facts.Dequeue(); bytes -= System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(removed, Wire.Json).Length; Lost(removed); incomplete = true; }
             if (monitoring && activity.Tick(time) is { } notification) Add(notification);
-            return new(DefaultInterpreter.Project(ledgers.Values, time), events.ToArray(), cursor, version,
-                streamGap || snapshotCoverage != "complete" || ledgers.Values.Any(s=>s.Coverage!="complete") ? "partial" : "complete", activity.Visible(time));
+            foreach (var key in incompleteOperations.Where(p => time - p.Value > TimeSpan.FromMinutes(20)).Select(p => p.Key).ToArray()) incompleteOperations.Remove(key);
+            var ledgers = facts.GroupBy(f => f.LedgerKey).Select(g => new EvidenceSession(g.First().Agent,
+                g.First().SessionNamespace, g.First().SessionId, g.First().SourceId, g.First().Origin,
+                g.ToArray(), g.Any(f => f.SequenceGap || incompleteOperations.ContainsKey(f.LedgerKey + "\u001f" + f.OperationId)) ? "partial" : "complete",
+                g.Where(f => f.SequenceGap || incompleteOperations.ContainsKey(f.LedgerKey + "\u001f" + f.OperationId)).Select(f => f.OperationId ?? "*").Distinct().ToArray()));
+            return new(DefaultInterpreter.Project(ledgers, time), events.ToArray(), cursor, version,
+                incomplete ? "partial" : "complete", activity.Visible(time));
         }
     }
-
     public void ResetMonitoring()
-    { lock (gate) { monitoring = false; activity.Reset(); version++; } }
-
-    private static void Validate(RuntimeSnapshot snapshot)
+    { lock (gate) { monitoring = false; activity.Reset(); cursor = null; diagnosticEpoch = null; facts.Clear(); incompleteOperations.Clear(); bytes = 0; version++; } }
+    private static void Validate(Fact fact)
     {
-        if (snapshot.Schema != 2 || string.IsNullOrWhiteSpace(snapshot.Epoch) || snapshot.Revision < 0 || snapshot.Sessions is null
-            || snapshot.Sessions.Any(s => s is null || string.IsNullOrWhiteSpace(s.SessionId) || string.IsNullOrWhiteSpace(s.SourceId)
-                || s.Facts is null || s.Facts.Any(f => f is null || f.Data is null || f.Schema != 2 || f.Id <= 0 || f.Id > snapshot.Revision)))
-            throw new InvalidDataException("不兼容的事实快照。");
+        if (fact.Schema != 3 || fact.Id <= 0 || fact.Data is null || fact.Origin is not ("file" or "external")
+            || string.IsNullOrWhiteSpace(fact.SourceId) || string.IsNullOrWhiteSpace(fact.SessionId) || fact.Historical)
+            throw new InvalidDataException("事实内容与协议不一致。");
     }
-
-    private void Replace(RuntimeSnapshot snapshot)
-    {
-        ledgers.Clear();
-        foreach (var ledger in snapshot.Sessions) ledgers[ledger.Key] = ledger;
-        snapshotCoverage = snapshot.Coverage;
-        viewRevision = snapshot.Revision; version++;
-    }
-
-    private bool RememberEnd(Fact f)
-    {
-        string key = DefaultInterpreter.EndKey(f);
-        if (!endings.Add(key)) return false;
-        endingOrder.Enqueue(key);
-        while (endingOrder.Count > 32768) endings.Remove(endingOrder.Dequeue());
-        return true;
-    }
-
     public bool Apply(SseMessage message, DateTimeOffset? receivedAt = null)
     {
         var next = Cursor.Parse(message.Id);
         lock (gate)
         {
             var time = receivedAt ?? DateTimeOffset.UtcNow;
-            if (message.Type is "snapshot" or "reset")
+            if (message.Type is "ready" or "gap")
             {
-                var snapshot = Wire.Read<RuntimeSnapshot>(message.Data); Validate(snapshot);
-                if (snapshot.Epoch != next.Epoch || snapshot.Revision != next.Revision) throw new InvalidDataException("快照与游标不一致。");
-                if (monitoring && cursor is not null && next.Epoch == cursor.Epoch && next.Revision <= cursor.Revision) return false;
-                if (cursor?.Epoch != next.Epoch) { endings.Clear(); endingOrder.Clear(); viewRevision = 0; }
-                if (next.Revision >= viewRevision) Replace(snapshot);
-                foreach (var fact in snapshot.Sessions.SelectMany(s => s.Facts)) if (DefaultInterpreter.EndOutcome(fact) is not null) RememberEnd(fact);
-                cursor = next;
-                activity.Reset(); monitoring = true;
-                if (message.Type == "reset") streamGap = true;
-                Add(new(DateTimeOffset.UtcNow, message.Type, null, message.Type == "reset"
-                    ? "事实流已重置，存在无法重放的区间；快照不生成完成通知。" : $"建立事实快照：{snapshot.Sessions.Length} 个来源会话（不产生完成通知）。"));
+                var boundary = Wire.Read<StreamBoundary>(message.Data);
+                if (boundary.Schema != 3 || boundary.Epoch != next.Epoch || boundary.Revision != next.Revision)
+                    throw new InvalidDataException("订阅边界与事件位置不一致。");
+                if (diagnosticEpoch != next.Epoch) { facts.Clear(); bytes = 0; }
+                diagnosticEpoch = next.Epoch;
+                activity.Reset(); cursor = next; monitoring = true; incomplete = message.Type == "gap";
+                Add(new(time, message.Type, null, message.Type == "gap"
+                    ? "实时流存在缺口，已清除显示轮次；从最新边界继续。"
+                    : "实时监测已连接；仅后续活动参与显示。"));
                 return true;
             }
             if (message.Type != "fact" || cursor is null || next.Epoch != cursor.Epoch || next.Revision != cursor.Revision + 1)
             {
                 if (cursor is not null && next.Epoch == cursor.Epoch && next.Revision <= cursor.Revision) return false;
-                throw new InvalidDataException("事实流存在间隙，需要重新获取快照。");
+                throw new InvalidDataException("实时流存在间隙，需要重新连接。");
             }
-            var factUpdate = Wire.Read<Fact>(message.Data);
-            if (factUpdate.Schema != 2 || factUpdate.Id != next.Revision || factUpdate.Data is null || factUpdate.Origin is not ("file" or "external")
-                || string.IsNullOrWhiteSpace(factUpdate.SourceId) || string.IsNullOrWhiteSpace(factUpdate.SessionId))
-                throw new InvalidDataException("事实内容与协议不一致。");
-            if (next.Revision > viewRevision) ApplyFact(factUpdate);
-            if (factUpdate.SequenceGap) streamGap = true;
-            string? end = DefaultInterpreter.EndOutcome(factUpdate);
-            bool uniqueEnd = end is null || RememberEnd(factUpdate);
-            ClientEvent? notification = null;
-            if (monitoring && !factUpdate.Historical)
-            {
-                if (activity.Tick(time) is { } inferred) Add(inferred);
-                if (uniqueEnd) notification = activity.Apply(factUpdate, time);
-            }
-            cursor = next; viewRevision = Math.Max(viewRevision, next.Revision);
-            Add(new(time, "fact", notification?.Session, "", factUpdate, notification is not null, notification?.NotificationOutcome));
+            var fact = Wire.Read<Fact>(message.Data); Validate(fact);
+            if (fact.Id != next.Revision) throw new InvalidDataException("事实与事件位置不一致。");
+            Retain(fact); incomplete |= fact.SequenceGap;
+            if (activity.Tick(time) is { } inferred) Add(inferred);
+            var notification = activity.Apply(fact, time);
+            cursor = next;
+            Add(new(time, "fact", notification?.Session, "", fact, notification is not null, notification?.NotificationOutcome));
             return true;
         }
     }
-
-    private void ApplyFact(Fact fact)
+    // Diagnostic import never changes the live cursor, activity or notifications.
+    public bool ImportRecent(RecentFacts recent)
     {
-        ledgers.TryGetValue(fact.LedgerKey, out var prior);
-        var facts = (prior?.Facts ?? []).Append(fact).ToArray();
-        string coverage = fact.SequenceGap ? "partial" : prior?.Coverage ?? "complete";
-        var incomplete=(prior?.IncompleteOperations??[]).ToHashSet();
-        if(fact.SequenceGap)incomplete.Add(string.IsNullOrEmpty(fact.OperationId)?"*":fact.OperationId);
-        var operations = facts.Reverse().Where(f => f.Kind is not ("source.heartbeat" or "source.health" or "session.observed")).Select(f => f.OperationId).Where(id => !string.IsNullOrEmpty(id)).Distinct().ToArray();
-        if (operations.Length > 32) coverage = "partial";
-        var allowed = operations.Take(32).ToHashSet();
-        var latest = new Dictionary<string,Fact>();
-        foreach (var f in facts.Where(f => string.IsNullOrEmpty(f.OperationId) || allowed.Contains(f.OperationId)))
-        {
-            string key = string.Join("\u001f",f.OperationId,f.Kind,f.Data.Scope);
-            if (f.Kind is "tool.observed" or "approval.observed")
-            {
-                string pair = key+"\u001fpair\u001f"+(f.Data.CallId??f.Data.RequestId);
-                if (f.Data.Phase is "finished" or "resolved") latest.Remove(pair); else latest[pair]=f;
-                key+="\u001flast";
-            }
-            else if(f.Kind=="lifecycle.observed") key+="\u001f"+f.Data.Phase;
-            else if(f.Kind=="source.heartbeat") key="source.heartbeat";
-            latest[key]=f;
-        }
-        facts=latest.Values.DistinctBy(f=>f.Id).OrderBy(f=>f.Id).ToArray();
-        if (facts.Length > 2048)
-        { foreach(var lost in facts[..^2048])incomplete.Add(string.IsNullOrEmpty(lost.OperationId)?"*":lost.OperationId); facts = facts[^2048..]; coverage = "partial"; }
-        if(incomplete.Count>33)incomplete=["*"];
-        ledgers[fact.LedgerKey] = new(fact.Agent, fact.SessionNamespace, fact.SessionId, fact.SourceId, fact.Origin, facts, coverage,incomplete.ToArray());
-    }
-
-    public bool Reconcile(RuntimeSnapshot snapshot)
-    {
-        Validate(snapshot);
+        if (recent.Schema != 3 || string.IsNullOrWhiteSpace(recent.Epoch) || recent.Facts is null)
+            throw new InvalidDataException("近期诊断记录格式无效。");
+        foreach (var fact in recent.Facts) { Validate(fact); if (fact.Id > recent.Revision) throw new InvalidDataException("无效的近期记录位置。"); }
         lock (gate)
         {
-            if (cursor is null || snapshot.Epoch != cursor.Epoch || snapshot.Revision < viewRevision) return false;
-            Replace(snapshot); return true;
+            if (cursor is not null && recent.Epoch != cursor.Epoch) return false;
+            if (diagnosticEpoch != recent.Epoch) { facts.Clear(); bytes = 0; }
+            diagnosticEpoch = recent.Epoch;
+            var ordered = facts.Concat(recent.Facts).DistinctBy(f => f.Id).OrderBy(f => f.Id).ToArray();
+            facts.Clear(); bytes = 0;
+            foreach (var fact in ordered) Retain(fact);
+            version++; return true;
         }
     }
     public void ClearEvents() { lock (gate) { events.Clear(); version++; } }

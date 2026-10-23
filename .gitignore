@@ -5,3 +5,6 @@ bin/
 coverage.out
 obj/
 TestResults/
+
+
+runtime/cmd/agent-status-setup/payload/*.exe

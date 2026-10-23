@@ -28,7 +28,7 @@ func stamp(raw json.RawMessage) time.Time {
 	return time.Time{}
 }
 func observation(kind, native, op string, t time.Time, data EventData) Fact {
-	f := Fact{InputEvent: InputEvent{Schema: 2, Kind: kind, OperationID: op, NativeType: native, Data: data}}
+	f := Fact{InputEvent: InputEvent{Schema: 3, Kind: kind, OperationID: op, NativeType: native, Data: data}}
 	if !t.IsZero() {
 		f.OccurredAt = &t
 	}
@@ -85,6 +85,9 @@ func parse(src *Source, line []byte) ([]Fact, error) {
 					delete(src.Parser.Calls, f.Data.CallID)
 				}
 			} else {
+				if len(src.Parser.Calls) >= 1024 {
+					return nil, errors.New("tool_association_limit")
+				}
 				src.Parser.Calls[f.Data.CallID] = f.OperationID
 			}
 		}

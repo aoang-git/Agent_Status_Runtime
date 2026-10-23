@@ -11,7 +11,7 @@ internal static class Display
     public static string Surface(string value) => value switch
     { "cli" => "CLI", "desktop" => "桌面", "subagent" => "子 Agent", "unknown" => "未识别入口", _ => Value(value) };
     public static string State(string value) => value switch
-    { "working" => "工作中", "tool_activity" => "工具活动", "waiting_confirmation" => "等待确认（推断）", "idle" => "空闲", "unknown" => "未知", "offline" => "离线", _ => Value(value) };
+    { "working" => "工作中", "tool_activity" => "工具活动", "waiting_confirmation" => "等待确认", "idle" => "空闲", "unknown" => "未知", "offline" => "离线", _ => Value(value) };
     public static string Confidence(string value) => value switch
     { "observed" => "直接观察", "inferred" => "推断", "external" => "外部报告", "unknown" => "未知", _ => Value(value) };
     public static string Freshness(string value) => value switch
@@ -23,7 +23,7 @@ internal static class Display
     public static string Capability(string value) => value switch
     { "partial" => "部分支持", "unsupported" => "不支持", "unverified" => "尚未验证", "explicit_records_only" => "仅明确结束记录", "inferred_requests_only" => "仅审批请求推断", _ => Value(value) };
     public static string Event(string value) => value switch
-    { "snapshot" => "初始事实快照", "reset" => "事实间隙 / 重置", "session.observed" => "会话记录", "input.observed" => "输入记录", "message.observed" => "消息记录", "tool.observed" => "工具记录", "approval.observed" => "审批记录", "lifecycle.observed" => "生命周期记录", "state.reported" => "外部状态报告", "source.heartbeat" => "来源心跳", "source.health" => "来源健康", _ => Value(value) };
+    { "ready" => "实时订阅就绪", "gap" => "实时流缺口", "recent" => "近期诊断", "session.observed" => "会话记录", "input.observed" => "输入记录", "message.observed" => "消息记录", "tool.observed" => "工具记录", "approval.observed" => "审批记录", "lifecycle.observed" => "生命周期记录", "state.reported" => "外部状态报告", "source.heartbeat" => "来源心跳", "source.health" => "来源健康", _ => Value(value) };
     public static string EventState(ClientEvent e)
     {
         if (e.IsNotification)

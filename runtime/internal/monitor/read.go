@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -25,11 +26,15 @@ type unit struct {
 // Seeded forks can contain end-seed markers inherited from ancestors. Find the
 // last tagged marker across the captured baseline before reducing any events.
 // A header-only or partially published SDK session remains unconfirmed.
-func prepareSeed(src *Source, f *os.File, size int64) error {
+func (e *Engine) prepareSeed(src *Source, f *os.File, size int64) error {
 	var offset int64
 	seeded, found, first := false, false, true
 	var cut int64
 	for offset < size {
+		if err := e.ctx.Err(); err != nil {
+			return err
+		}
+		e.progress.Store(time.Now().UnixNano())
 		units, err := readUnits(f, offset, size)
 		if err != nil {
 			return err

@@ -12,10 +12,11 @@ internal sealed class LatestActivity
     private string source = "";
     private DateTimeOffset? candidate;
     private DateTimeOffset noticeUntil;
-    private bool waiting;
+    private bool waiting, incomplete;
+    internal Session? Current => current;
 
     public void Reset()
-    { current = null; tools.Clear(); approvals.Clear(); candidate = null; waiting = false; }
+    { current = null; tools.Clear(); approvals.Clear(); candidate = null; waiting = false; incomplete = false; }
 
     public Session? Visible(DateTimeOffset now) => current is null || current.EndedAt is not null && now >= noticeUntil ? null : current;
 
@@ -28,15 +29,25 @@ internal sealed class LatestActivity
         if (f.Kind == "source.health")
         {
             if (current is not null && current.EndedAt is null && f.SourceId == source && f.Data.Health is "degraded" or "unavailable")
-                current = current with { State = "unknown", Confidence = "unknown", SourceHealth = f.Data.Health, Reason = "source_unavailable" };
+                { current = current with { State = "unknown", Confidence = "unknown", SourceHealth = f.Data.Health, Reason = "source_unavailable" }; candidate = null; incomplete = true; }
             return null;
         }
         if (f.Kind is not ("input.observed" or "message.observed" or "tool.observed" or "approval.observed" or "lifecycle.observed" or "state.reported")) return null;
         if (f.Kind == "lifecycle.observed" && f.Data.Scope is not ("agent_turn" or "agent_run")) return null;
         if (f.Kind == "state.reported" && f.Data.State is "idle" or "offline") { Reset(); return null; }
+        if (f.Kind == "state.reported" && f.Data.State == "unknown" && string.IsNullOrEmpty(f.OperationId)
+            && current is not null && current.EndedAt is null && f.Agent == current.Agent && f.SessionNamespace == current.SessionNamespace && f.SessionId == current.NativeSessionId)
+            f = f with { OperationId = current.TurnId };
         string? end = DefaultInterpreter.EndOutcome(f);
         bool same = Matches(f);
-        if (same && current!.EndedAt is not null && end is not null && (f.Data.Scope ?? "agent_turn") == current.OperationScope) return null;
+        if (same && current!.EndedAt is not null && end is not null && (f.Data.Scope ?? "agent_turn") == current.OperationScope)
+        {
+            if (current.Outcome == end) return null;
+            current = current with { Outcome = end, Origin = f.Origin, ReportedBasis = f.ReportedBasis ?? "", UpdatedAt = now,
+                Reason = "explicit_end", Confidence = f.Origin == "external" ? "external" : "observed" };
+            noticeUntil = now + NoticeDuration;
+            return new(now, "fact", current, "", f, true, end);
+        }
         if (!same || current!.EndedAt is not null)
         {
             Reset();
@@ -48,10 +59,12 @@ internal sealed class LatestActivity
         }
         source = f.SourceId;
         candidate = null;
+        incomplete |= f.SequenceGap;
+        bool unknown = f.Kind == "state.reported" && f.Data.State == "unknown" || f.Kind == "lifecycle.observed" && f.Data.Phase == "ended" && end is null;
         current = current! with
         {
             Origin = f.Origin, ReportedBasis = f.ReportedBasis ?? "", Confidence = f.Origin == "external" ? "external" : "inferred",
-            UpdatedAt = now, LastActivityAt = now, Freshness = "fresh", SourceHealth = "healthy",
+            UpdatedAt = now, LastActivityAt = unknown && current.LastActivityAt != default ? current.LastActivityAt : now, Freshness = "fresh", SourceHealth = "healthy",
             OperationScope = f.Data.Scope ?? current.OperationScope, Reason = f.NativeType ?? f.Kind
         };
         if (end is not null) return Finish(end, now, now, f);
@@ -60,7 +73,7 @@ internal sealed class LatestActivity
         {
             case "message.observed":
                 if (f.Data.Outcome is "failed" or "interrupted" || f.Data.StopReason is "max_tokens" or "length" or "error" or "aborted") state = "unknown";
-                else if (!f.SequenceGap && f.Data.Role == "assistant" && f.Data.HasTools != true && tools.Count == 0 && approvals.Count == 0
+                else if (f.Origin == "file" && !incomplete && f.Data.Role == "assistant" && f.Data.HasTools != true && tools.Count == 0 && approvals.Count == 0
                     && (f.Agent == "claude" && f.Data.StopReason is "end_turn" or "stop_sequence" || f.Agent == "pi" && f.Data.StopReason == "stop")) candidate = now;
                 break;
             case "tool.observed":
@@ -72,7 +85,9 @@ internal sealed class LatestActivity
             case "lifecycle.observed":
                 if (f.Data.Phase == "ended") state = "unknown";
                 break;
-            case "state.reported": state = f.Data.State ?? "unknown"; break;
+            case "state.reported":
+                tools.Clear(); approvals.Clear();
+                state = f.Data.State ?? "unknown"; break;
         }
         waiting = approvals.Count > 0 || state == "waiting_confirmation";
         if (state != "unknown") state = waiting ? "waiting_confirmation" : tools.Count > 0 ? "tool_activity" : state;

@@ -12,8 +12,8 @@ public sealed class ClientTests
     private static Fact Sample(long id=1, string kind="input.observed", string origin="file") => new()
     { Id=id, ProducerId="p", EventId=id.ToString(), Agent="codex", SessionNamespace="local", SessionId="one", OperationId="op", Kind=kind, SourceId="source", Origin=origin, ReceivedAt=DateTimeOffset.UtcNow, OccurredAt=DateTimeOffset.UtcNow };
     private static EvidenceSession Ledger(params Fact[] facts) => new("codex","local","one","source","file",facts);
-    private static SseMessage Snapshot(string epoch="a",long revision=0,string type="snapshot",params Fact[] facts) =>
-        new($"{epoch}:{revision}",type,Json(new RuntimeSnapshot(2,epoch,revision,facts.Length==0?[]:[Ledger(facts)])));
+    private static SseMessage Snapshot(string epoch="a",long revision=0,string type="ready",params Fact[] facts) =>
+        new($"{epoch}:{revision}",type=="reset"?"gap":type,Json(new StreamBoundary(3,epoch,revision)));
     private static SseMessage Change(long id, Fact? fact=null) => new($"a:{id}","fact",Json(fact??Sample(id)));
 
     [TestMethod]
@@ -28,25 +28,48 @@ public sealed class ClientTests
         Assert.DoesNotContain("secret-broken", damaged.Message);
         foreach (var url in new[] { "https://127.0.0.1:9120", "http://example.com", "http://192.168.1.10", "http://user@127.0.0.1", "http://127.0.0.1/?token=bad" })
         {
-            await File.WriteAllTextAsync(path, Json(new { url, token = "SECRET" }));
+            await File.WriteAllTextAsync(path, Json(new { url, token = "SECRET", epoch = "a", pid = 123 }));
             await Assert.ThrowsAsync<InvalidDataException>(() => RuntimeConnection.LoadAsync(directory.Path, default));
         }
-        await File.WriteAllTextAsync(path, Json(new { url = "http://127.0.0.1:9120", token = "SECRET" }));
+        await File.WriteAllTextAsync(path, Json(new { url = "http://127.0.0.1:9120", token = "SECRET", epoch = "a", pid = 123 }));
         var connection = await RuntimeConnection.LoadAsync(directory.Path, default);
         Assert.DoesNotContain("SECRET", connection.ToString());
     }
 
     [TestMethod]
-    public void DiscoveryHonorsExplicitDirectoryAndProjectBeforeUserDefault()
+    public void DiscoveryPrefersInstalledDirectoryAndOnlyFallsBackToCurrentProjectConnection()
     {
         using var root = new TempDirectory();
         var bin = System.IO.Path.Combine(root.Path, "bin");
         var project = System.IO.Path.Combine(root.Path, ".runtime", "live");
-        Assert.AreEqual(System.IO.Path.Combine(root.Path, "AgentStatusRuntime"), RuntimeConnection.DiscoverDirectory(null, bin, root.Path));
+        var installed = System.IO.Path.Combine(root.Path, "AgentStatusRuntime");
+        Assert.AreEqual(installed, RuntimeConnection.DiscoverDirectory(null, bin, root.Path));
         Directory.CreateDirectory(System.IO.Path.Combine(project, "private"));
-        File.WriteAllText(System.IO.Path.Combine(project, "private", "connection.json"), "{}");
+        var projectConnection = System.IO.Path.Combine(project, "private", "connection.json");
+        File.WriteAllText(projectConnection, Json(new { url = "http://127.0.0.1:9120", token = "SECRET" }));
+        Assert.AreEqual(installed, RuntimeConnection.DiscoverDirectory(null, bin, root.Path), "旧项目连接文件不得遮住用户运行目录。");
+        File.WriteAllText(projectConnection, Json(new { url = "http://127.0.0.1:9120", token = "SECRET", epoch = "a", pid = 123 }));
         Assert.AreEqual(project, RuntimeConnection.DiscoverDirectory(null, bin, root.Path));
+        Directory.CreateDirectory(System.IO.Path.Combine(installed, "private"));
+        File.WriteAllText(System.IO.Path.Combine(installed, "private", "connection.json"), Json(new { url = "http://127.0.0.1:9121", token = "SECRET", epoch = "b", pid = 456 }));
+        Assert.AreEqual(installed, RuntimeConnection.DiscoverDirectory(null, bin, root.Path), "用户安装的服务应优先于开发目录。");
+        File.WriteAllText(projectConnection, "{broken");
+        Assert.AreEqual(installed, RuntimeConnection.DiscoverDirectory(null, bin, root.Path));
         Assert.AreEqual(root.Path, RuntimeConnection.DiscoverDirectory(root.Path, bin, root.Path));
+    }
+
+    [TestMethod]
+    public async Task OldConnectionFileIsReportedAsIncompatibleInsteadOfDamaged()
+    {
+        using var root = new TempDirectory();
+        Directory.CreateDirectory(System.IO.Path.Combine(root.Path, "private"));
+        var path = System.IO.Path.Combine(root.Path, "private", "connection.json");
+        await File.WriteAllTextAsync(path, Json(new { url = "http://127.0.0.1:9120", token = "SECRET" }));
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() => RuntimeConnection.LoadAsync(root.Path, default));
+        StringAssert.Contains(error.Message, "服务实例标识");
+        StringAssert.Contains(error.Message, "选择");
+        Assert.DoesNotContain("损坏", error.Message);
+        Assert.DoesNotContain("SECRET", error.Message);
     }
 
     [TestMethod]
@@ -58,7 +81,7 @@ public sealed class ClientTests
             Assert.AreEqual("SECRET", request.Headers.Authorization?.Parameter);
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Unauthorized));
         }));
-        var error = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetAsync<RuntimeInfo>(new(new("http://127.0.0.1:9120"), "SECRET"), "/v2/info", default));
+        var error = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetAsync<RuntimeInfo>(new(new("http://127.0.0.1:9120"), "SECRET"), "/v3/info", default));
         Assert.AreEqual(HttpStatusCode.Unauthorized, error.StatusCode);
         Assert.DoesNotContain("SECRET", error.Message);
     }
@@ -81,7 +104,7 @@ public sealed class ClientTests
     {
         var state=new MonitorState();
         state.Apply(Snapshot(revision:1,facts:[Sample()]));
-        Assert.IsFalse(state.Apply(Snapshot(revision:1,facts:[Sample()])));
+        Assert.IsNull(state.View().Activity);
         var ended=Sample(2,"lifecycle.observed") with {Data=new(){Phase="ended",Scope="agent_turn",Outcome="completed"}};
         Assert.IsTrue(state.Apply(Change(2,ended)));
         Assert.IsFalse(state.Apply(Change(2,ended)));
@@ -101,7 +124,7 @@ public sealed class ClientTests
         Assert.Throws<InvalidDataException>(()=>state.Apply(Change(3)));
         Assert.Throws<InvalidDataException>(()=>state.Apply(Change(2) with {Id="wrong:2"}));
         Assert.AreEqual("a:1",state.View().Cursor?.ToString());
-        Assert.HasCount(1,state.View().Sessions);
+        Assert.HasCount(0,state.View().Sessions);
     }
 
     [TestMethod]
@@ -115,18 +138,17 @@ public sealed class ClientTests
     }
 
     [TestMethod]
-    public void SnapshotAheadOfSseDoesNotConsumeNotificationsOrRevertTheView()
+    public void RecentIsDiagnosticOnlyAndDoesNotConsumeLiveEvents()
     {
-        var state=new MonitorState();state.Apply(Snapshot(revision:1,facts:[Sample()]));
-        var ended=Sample(2,"lifecycle.observed") with {Data=new(){Phase="ended",Scope="agent_turn",Outcome="completed"}};
-        var next=Sample(3) with {OperationId="new"};
-        Assert.IsTrue(state.Reconcile(new(2,"a",3,[Ledger(Sample(),ended,next)])));
-        Assert.AreEqual(1L,state.View().Cursor?.Revision);
-        state.Apply(Change(2,ended));
-        Assert.HasCount(1,state.View().Events.Where(e=>e.IsNotification).ToArray());
-        Assert.AreEqual("new",state.View().Sessions[0].TurnId);
-        state.Apply(Change(3,next));
-        Assert.IsFalse(state.Reconcile(new(2,"a",1,[Ledger(Sample())])));
+        var state = new MonitorState();
+        var seed = Sample(); state.ImportRecent(new(3,"a",1,[seed]));
+        state.Apply(Snapshot()); Assert.HasCount(1, state.View().Sessions);
+        var end = Sample(1, "lifecycle.observed") with { Data = new() { Phase = "ended", Scope = "agent_turn", Outcome = "completed" } };
+        state.ImportRecent(new(3,"a",1,[end]));
+        Assert.IsNull(state.View().Activity); Assert.AreEqual(0L,state.View().Cursor?.Revision);
+        Assert.HasCount(0,state.View().Events.Where(e=>e.IsNotification).ToArray());
+        state.Apply(Change(1,end)); Assert.HasCount(1,state.View().Events.Where(e=>e.IsNotification).ToArray());
+        state.Apply(Snapshot(revision:4,type:"gap")); Assert.IsNull(state.View().Activity);
     }
 
     [TestMethod]
@@ -157,41 +179,57 @@ public sealed class ClientTests
         using var root = new TempDirectory();
         var path = System.IO.Path.Combine(root.Path, "private", "connection.json");
         Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
-        await File.WriteAllTextAsync(path, Json(new { url = "http://127.0.0.1:9120", token = "old-token" }));
+        await File.WriteAllTextAsync(path, Json(new { url = "http://127.0.0.1:9120", token = "old-token", epoch = "a", pid = 123 }));
         using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(8));
         int streams = 0; bool newTokenSeen = false;
         using var client = new RuntimeClient(new FakeHandler(async (request, token) =>
         {
             var route = request.RequestUri!.AbsolutePath;
-            if (route == "/v2/info")
+            if (route == "/v3/info")
             {
                 if (request.Headers.Authorization?.Parameter == "new-token") newTokenSeen = true;
-                return JsonResponse(new RuntimeInfo("sample", 2, "facts", "a"));
+                return JsonResponse(new RuntimeInfo("sample", 3, "facts", "a"));
             }
-            if (route == "/v2/health") return JsonResponse(new Health([], [], "polling"));
-            if (route == "/v2/capabilities") return JsonResponse(Array.Empty<Capability>());
-            if (route == "/v2/snapshot") return JsonResponse(new RuntimeSnapshot(2,"a",0,[]));
+            if (route == "/v3/health") return JsonResponse(new Health([], [], "polling"));
+            if (route == "/v3/capabilities") return JsonResponse(Array.Empty<Capability>());
+            if (route == "/v3/recent") return JsonResponse(new RecentFacts(3,"a",0,[]));
             Assert.IsFalse(request.Headers.Contains("Last-Event-ID"), "每次连接应建立新基线，不恢复断线期间的事实流。");
             if (Interlocked.Increment(ref streams) == 1)
             {
-                await File.WriteAllTextAsync(path, Json(new { url = "http://127.0.0.1:9120", token = "new-token" }), token);
+                await File.WriteAllTextAsync(path, Json(new { url = "http://127.0.0.1:9120", token = "new-token", epoch = "a", pid = 123 }), token);
                 return new(HttpStatusCode.Unauthorized);
             }
             var snapshot = Snapshot(revision:1,facts: [Sample()]);
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent($"id: {snapshot.Id}\nevent: snapshot\ndata: {snapshot.Data}\n\n", Encoding.UTF8, "text/event-stream")
+                Content = new StringContent($"id: {snapshot.Id}\nevent: ready\ndata: {snapshot.Data}\n\n", Encoding.UTF8, "text/event-stream")
             };
         }));
         var state = new MonitorState();
         state.Apply(Snapshot());
         using var controller = new MonitorController(state, client);
-        controller.Changed += () => { if (controller.State.View().Sessions.Length == 1) stop.Cancel(); };
+        controller.Changed += () => { if (controller.State.View().Cursor?.Revision == 1) stop.Cancel(); };
         await controller.RunAsync(root.Path, stop.Token);
         Assert.IsTrue(newTokenSeen);
         Assert.AreEqual(2, streams);
-        Assert.HasCount(1, controller.State.View().Sessions);
+        Assert.IsNull(controller.State.View().Activity);
         CollectionAssert.AreEqual(new[] { 1D, 2D, 5D, 10D, 10D }, Enumerable.Range(1, 5).Select(n => MonitorController.RetryDelay(n).TotalSeconds).ToArray());
+    }
+
+
+    [TestMethod]
+    public void InterleavedRecentImportExpiresOldRecordsAndDoesNotPoisonNewRounds()
+    {
+        var time = DateTimeOffset.UtcNow;
+        var state = new MonitorState(); state.Apply(Snapshot(revision:1));
+        var active = Sample(2) with { ReceivedAt = time, Agent = "pi" };
+        state.Apply(Change(2, active), time);
+        var old = Sample(0) with { Id = 1, ReceivedAt = time.AddMinutes(-20), SessionId = "old" };
+        state.ImportRecent(new(3,"a",2,[old]));
+        Assert.IsFalse(state.View(time).Sessions.Any(s => s.NativeSessionId == "old"));
+        state.Apply(Change(3, active with { Id = 3, OperationId = "next" }), time.AddSeconds(1));
+        state.Apply(Change(4, active with { Id = 4, OperationId = "next", Kind = "message.observed", Data = new() { Role = "assistant", StopReason = "stop" } }), time.AddSeconds(2));
+        Assert.AreEqual("idle", state.View(time.AddSeconds(5)).Sessions.Single().State);
     }
 
     internal static HttpResponseMessage JsonResponse(object body) => new(HttpStatusCode.OK)

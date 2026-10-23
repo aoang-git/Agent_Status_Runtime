@@ -4,14 +4,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"sort"
 	"time"
 )
 
-const Version = "0.2.0"
+const Version = "0.3.0"
 const EventLimit = 4096
 const MaxInput = 16 << 10
-const MaxSnapshotBytes = 8 << 20
 
 type Root struct {
 	Agent string `json:"agent"`
@@ -103,26 +101,8 @@ type Source struct {
 	Generation     int         `json:"generation,omitempty"`
 	Incarnation    string      `json:"incarnation"`
 	ParserRevision int         `json:"parser_revision"`
+	LastSeen       time.Time   `json:"-"`
 	Bootstrap      int64       `json:"-"`
-}
-
-type EvidenceSession struct {
-	Agent                string   `json:"agent"`
-	Namespace            string   `json:"session_namespace"`
-	SessionID            string   `json:"session_id"`
-	SourceID             string   `json:"source_id"`
-	Origin               string   `json:"origin"`
-	Facts                []Fact   `json:"facts"`
-	Coverage             string   `json:"coverage"`
-	IncompleteOperations []string `json:"incomplete_operations"`
-}
-
-type Snapshot struct {
-	Schema   int               `json:"schema"`
-	Epoch    string            `json:"epoch"`
-	Revision int64             `json:"revision"`
-	Sessions []EvidenceSession `json:"sessions"`
-	Coverage string            `json:"coverage"`
 }
 
 type SourceStatus struct {
@@ -162,96 +142,6 @@ func cloneSource(src *Source) *Source {
 	var next Source
 	_ = json.Unmarshal(b, &next)
 	next.Bootstrap = src.Bootstrap
+	next.LastSeen = src.LastSeen
 	return &next
-}
-
-// This ledger retains observations, not business states. Pair keys never cross
-// sources or operations. Source timestamps do not reorder accepted facts.
-func retainEvidence(s *EvidenceSession, f Fact) {
-	s.Facts = append(s.Facts, f)
-	if f.SequenceGap {
-		s.Coverage = "partial"
-		markIncomplete(s, f.OperationID)
-	}
-	ops := []string{}
-	seen := map[string]bool{}
-	for i := len(s.Facts) - 1; i >= 0; i-- {
-		if s.Facts[i].Kind == "source.heartbeat" || s.Facts[i].Kind == "source.health" || s.Facts[i].Kind == "session.observed" {
-			continue
-		}
-		op := s.Facts[i].OperationID
-		if op != "" && !seen[op] {
-			seen[op] = true
-			ops = append(ops, op)
-		}
-	}
-	allowed := map[string]bool{"": true}
-	for i, op := range ops {
-		if i < 32 {
-			allowed[op] = true
-		} else {
-			s.Coverage = "partial"
-		}
-	}
-	latest := map[string]Fact{}
-	for _, v := range s.Facts {
-		if !allowed[v.OperationID] {
-			continue
-		}
-		key := v.OperationID + "\x00" + v.Kind + "\x00" + v.Data.Scope
-		switch v.Kind {
-		case "tool.observed":
-			pair := key + "\x00pair\x00" + v.Data.CallID
-			if v.Data.Phase == "finished" {
-				delete(latest, pair)
-			} else {
-				latest[pair] = v
-			}
-			key += "\x00last"
-		case "approval.observed":
-			pair := key + "\x00pair\x00" + v.Data.RequestID
-			if v.Data.Phase == "resolved" {
-				delete(latest, pair)
-			} else {
-				latest[pair] = v
-			}
-			key += "\x00last"
-		case "lifecycle.observed":
-			key += "\x00" + v.Data.Phase
-		case "source.heartbeat":
-			key = "source.heartbeat"
-		}
-		latest[key] = v
-	}
-	s.Facts = s.Facts[:0]
-	seenIDs := map[int64]bool{}
-	for _, v := range latest {
-		if !seenIDs[v.ID] {
-			s.Facts = append(s.Facts, v)
-			seenIDs[v.ID] = true
-		}
-	}
-	sort.Slice(s.Facts, func(i, j int) bool { return s.Facts[i].ID < s.Facts[j].ID })
-	if len(s.Facts) > 2048 {
-		for _, lost := range s.Facts[:len(s.Facts)-2048] {
-			markIncomplete(s, lost.OperationID)
-		}
-		s.Facts = s.Facts[len(s.Facts)-2048:]
-		s.Coverage = "partial"
-	}
-}
-
-func markIncomplete(s *EvidenceSession, op string) {
-	if op == "" {
-		op = "*"
-	}
-	for _, prior := range s.IncompleteOperations {
-		if prior == op {
-			return
-		}
-	}
-	s.IncompleteOperations = append(s.IncompleteOperations, op)
-	if len(s.IncompleteOperations) > 33 {
-		s.IncompleteOperations = []string{"*"}
-	}
 }

@@ -40,14 +40,16 @@ public sealed class MonitorController(MonitorState state, RuntimeClient? client 
             {
                 var endpoint = await RuntimeConnection.LoadAsync(directory, cancellationToken);
                 SetConnection(new("connecting", "正在连接事件流…", endpoint.Endpoint.ToString()));
-                var runtimeInfo = await client.GetAsync<RuntimeInfo>(endpoint, "/v2/info", cancellationToken);
-                if (runtimeInfo.Schema != 2 || string.IsNullOrWhiteSpace(runtimeInfo.Epoch))
+                var runtimeInfo = await client.GetAsync<RuntimeInfo>(endpoint, "/v3/info", cancellationToken);
+                if (runtimeInfo.Schema != 3 || runtimeInfo.Epoch != endpoint.Epoch)
                     throw new InvalidDataException("不兼容的 Runtime 协议版本。");
                 lock (gate) info = runtimeInfo;
+                State.ImportRecent(await client.GetAsync<RecentFacts>(endpoint, "/v3/recent", attempt.Token));
                 await RefreshDiagnostics(endpoint, attempt.Token);
                 diagnostics = PollDiagnostics(endpoint, attempt.Token);
-                stream = client.SubscribeAsync(endpoint, null, message =>
+                stream = client.SubscribeAsync(endpoint, message =>
                 {
+                    if (Cursor.Parse(message.Id).Epoch != endpoint.Epoch) throw new InvalidDataException("服务实例发生变化。");
                     if (State.Apply(message)) Changed?.Invoke();
                     failures = 0;
                     return Task.CompletedTask;
@@ -56,7 +58,7 @@ public sealed class MonitorController(MonitorState state, RuntimeClient? client 
                     lock (gate)
                     {
                         lastReceived = DateTimeOffset.UtcNow;
-                        connection = new("connected", "事实监测 · default-v1 客户端解释", endpoint.Endpoint.ToString());
+                        connection = new("connected", "实时监测 · 客户端解释", endpoint.Endpoint.ToString());
                     }
                     Changed?.Invoke();
                 }, attempt.Token);
@@ -90,14 +92,12 @@ public sealed class MonitorController(MonitorState state, RuntimeClient? client 
 
     private async Task RefreshDiagnostics(RuntimeConnection endpoint, CancellationToken token)
     {
-        var healthTask = client.GetAsync<Health>(endpoint, "/v2/health", token);
-        var capabilitiesTask = client.GetAsync<Capability[]>(endpoint, "/v2/capabilities", token);
-        var snapshotTask = client.GetAsync<RuntimeSnapshot>(endpoint, "/v2/snapshot", token);
-        await Task.WhenAll(healthTask, capabilitiesTask, snapshotTask);
+        var healthTask = client.GetAsync<Health>(endpoint, "/v3/health", token);
+        var capabilitiesTask = client.GetAsync<Capability[]>(endpoint, "/v3/capabilities", token);
+                await Task.WhenAll(healthTask, capabilitiesTask);
         if (healthTask.Result.Roots is null || healthTask.Result.Sources is null ||
             healthTask.Result.Sources.Any(source => source is null) || capabilitiesTask.Result.Any(capability => capability is null))
             throw new InvalidDataException("采集诊断数据不完整。");
-        State.Reconcile(snapshotTask.Result);
         lock (gate) { health = healthTask.Result; capabilities = capabilitiesTask.Result; }
         Changed?.Invoke();
     }
@@ -121,7 +121,7 @@ public sealed class MonitorController(MonitorState state, RuntimeClient? client 
         JsonException => "服务数据或连接文件格式损坏。",
         InvalidDataException => error.Message,
         HttpRequestException { StatusCode: System.Net.HttpStatusCode.Unauthorized } => "凭据已失效（HTTP 401），将重新读取连接文件。",
-        HttpRequestException => "服务不可达或返回错误；最后快照已保留。",
+        HttpRequestException => "服务不可达或返回错误。",
         TimeoutException or OperationCanceledException => "服务响应或心跳超时；最后快照已保留。",
         _ => "连接已断开或文件暂不可读；最后快照已保留。"
     };

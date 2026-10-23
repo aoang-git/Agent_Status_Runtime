@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"time"
@@ -33,17 +32,28 @@ func (r *rootsFlag) Set(s string) error {
 type connection struct {
 	URL   string `json:"url"`
 	Token string `json:"token"`
+	PID   int    `json:"pid"`
+	Epoch string `json:"epoch"`
 }
 
 func main() {
+	prepareConsole()
+	if len(os.Args) > 1 && isMaintenance(os.Args[1]) {
+		if err := maintenance(os.Args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
-func run(args []string) error {
+func run(args []string) (result error) {
+	var output io.Writer = os.Stderr
 	if len(args) == 0 {
-		return errors.New("usage: agent-statusd serve|status|doctor|watch|report|integration-prompt|version [flags]")
+		return errors.New("usage: agent-statusd serve|status|doctor|watch|report|integration-prompt|version|start|stop|restart|uninstall [flags]")
 	}
 	if args[0] == "version" {
 		fmt.Println(monitor.Version)
@@ -57,6 +67,7 @@ func run(args []string) error {
 	dataDir := flags.String("data-dir", filepath.Join(base, "AgentStatusRuntime"), "runtime-owned data directory")
 	listen := flags.String("listen", "127.0.0.1:9120", "loopback address (serve)")
 	interval := flags.Duration("interval", 5*time.Second, "fallback discovery scan interval")
+	background := flags.Bool("background", false, "background logging (serve)")
 	bestEffort := flags.Bool("best-effort", false, "report silently without blocking the Agent on failure")
 	validateOnly := flags.Bool("validate-only", false, "validate report JSON without contacting Runtime")
 	var roots rootsFlag
@@ -103,17 +114,26 @@ func run(args []string) error {
 	if err := monitor.ProtectDirectory(private); err != nil {
 		return fmt.Errorf("protect runtime directory: %w", err)
 	}
-	dbPath := filepath.Join(private, "state.sqlite")
+	if *background {
+		logFile, err := monitor.NewDiagnosticLog(filepath.Join(private, "service.log"))
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if result != nil {
+				fmt.Fprintln(logFile, result)
+			}
+			_ = logFile.Close()
+		}()
+		output = logFile
+	}
+	dbPath := filepath.Join(private, "runtime")
 	release, err := monitor.AcquireLease(dbPath)
 	if err != nil {
 		return err
 	}
 	defer release()
-	store, err := monitor.OpenStore(filepath.Join(private, "facts-v2.sqlite"))
-	if err != nil {
-		return err
-	}
-	defer store.Close()
+	store := monitor.NewStore()
 	if len(roots) == 0 {
 		roots = monitor.DefaultRoots()
 	}
@@ -121,10 +141,16 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := engine.Scan(); err != nil {
-		return err
-	}
 	listener, err := net.Listen("tcp", *listen)
+	explicit := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "listen" {
+			explicit = true
+		}
+	})
+	if err != nil && !explicit {
+		listener, err = net.Listen("tcp", "127.0.0.1:0")
+	}
 	if err != nil {
 		return err
 	}
@@ -133,24 +159,25 @@ func run(args []string) error {
 	writeToken := monitor.NewToken()
 	url := "http://" + listener.Addr().String()
 	connFile := filepath.Join(private, "connection.json")
-	b, _ := json.Marshal(connection{url, token})
-	if err := os.WriteFile(connFile, b, 0600); err != nil {
+	b, _ := json.Marshal(connection{url, token, os.Getpid(), store.Epoch})
+	if err := atomicWrite(connFile, b); err != nil {
 		return err
 	}
 	defer os.Remove(connFile)
 	ingestFile := filepath.Join(private, "ingest.json")
-	b, _ = json.Marshal(connection{url, writeToken})
-	if err := os.WriteFile(ingestFile, b, 0600); err != nil {
+	b, _ = json.Marshal(connection{url, writeToken, os.Getpid(), store.Epoch})
+	if err := atomicWrite(ingestFile, b); err != nil {
 		return err
 	}
 	defer os.Remove(ingestFile)
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := serviceContext(*dataDir)
 	defer cancel()
 	server := &http.Server{Handler: monitor.Handler(engine, token, writeToken), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10, BaseContext: func(net.Listener) context.Context { return ctx }}
 	errorsCh := make(chan error, 2)
-	go func() { errorsCh <- engine.Run(ctx, *interval) }()
+	engineDone := make(chan struct{})
+	go func() { defer close(engineDone); errorsCh <- engine.Run(ctx, *interval) }()
 	go func() { errorsCh <- server.Serve(listener) }()
-	fmt.Fprintln(os.Stderr, "Agent Status Runtime", monitor.Version, "facts", url)
+	fmt.Fprintln(output, "Agent Status Runtime", monitor.Version, "facts", url)
 	select {
 	case <-ctx.Done():
 	case err = <-errorsCh:
@@ -161,6 +188,10 @@ func run(args []string) error {
 	_ = server.Shutdown(shutdownCtx)
 	// SSE handlers inherit request contexts, which Shutdown alone does not cancel.
 	_ = server.Close()
+	select {
+	case <-engineDone:
+	case <-shutdownCtx.Done():
+	}
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
@@ -168,13 +199,13 @@ func run(args []string) error {
 }
 
 func client(command, dataDir string) error {
-	path := "/v2/snapshot"
+	path := "/v3/recent"
 	switch command {
 	case "status":
 	case "doctor":
-		path = "/v2/health"
+		path = "/v3/health"
 	case "watch":
-		path = "/v2/events"
+		path = "/v3/events"
 	default:
 		return errors.New("unknown command")
 	}
@@ -203,4 +234,23 @@ func client(command, dataDir string) error {
 	}
 	_, err = io.Copy(os.Stdout, response.Body)
 	return err
+}
+
+func atomicWrite(path string, b []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".connection-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	defer os.Remove(name)
+	if err = f.Chmod(0600); err == nil {
+		_, err = f.Write(b)
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }

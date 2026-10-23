@@ -61,17 +61,17 @@ func sendReport(dir string, validateOnly, silent bool) error {
 	if err != nil {
 		return errors.New("stdin_read_failed")
 	}
-	input, err := monitor.DecodeInput(b)
+	_, err = monitor.DecodeReport(b)
 	if err != nil {
 		return err
 	}
 	if validateOnly {
 		if !silent {
-			fmt.Fprintln(os.Stdout, `{"schema":2,"valid":true}`)
+			fmt.Fprintln(os.Stdout, `{"schema":3,"valid":true}`)
 		}
 		return nil
 	}
-	b, _ = json.Marshal(input)
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	transport := &http.Transport{Proxy: nil}
@@ -82,7 +82,7 @@ func sendReport(dir string, validateOnly, silent bool) error {
 		if err != nil {
 			return err
 		}
-		req, _ := http.NewRequestWithContext(ctx, "POST", conn.URL+"/v2/ingest", bytes.NewReader(b))
+		req, _ := http.NewRequestWithContext(ctx, "POST", conn.URL+"/v3/ingest", bytes.NewReader(b))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+conn.Token)
 		resp, err := client.Do(req)
@@ -108,7 +108,7 @@ func sendReport(dir string, validateOnly, silent bool) error {
 			ID     int64  `json:"id"`
 			Epoch  string `json:"epoch"`
 		}
-		if json.Unmarshal(body, &ack) != nil || ack.Schema != 2 || ack.ID < 1 || ack.Epoch == "" {
+		if json.Unmarshal(body, &ack) != nil || ack.Schema != 3 || ack.ID < 1 || ack.Epoch == "" {
 			return errors.New("invalid_ack")
 		}
 		// Hook-friendly mode is handled without emitting acknowledgement content.

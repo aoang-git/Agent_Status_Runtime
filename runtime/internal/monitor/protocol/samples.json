@@ -1,370 +1,84 @@
 {
   "valid": [
     {
-      "name": "session.observed",
+      "name": "working",
       "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
+        "schema": 3,
+        "producer_id": "pi-status",
         "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "session.observed",
-        "data": {
-          "surface": "cli"
-        }
+        "agent": "pi",
+        "session_id": "s",
+        "operation_id": "run-1",
+        "state": "working",
+        "reported_basis": "native_event"
       }
     },
     {
-      "name": "input.observed",
+      "name": "idle",
       "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
+        "schema": 3,
+        "producer_id": "pi-status",
         "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "input.observed",
-        "data": {}
-      }
-    },
-    {
-      "name": "message.observed",
-      "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
-        "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "message.observed",
-        "data": {
-          "role": "assistant",
-          "stop_reason": "stop",
-          "has_tools": false
-        }
-      }
-    },
-    {
-      "name": "tool.observed",
-      "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
-        "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "tool.observed",
-        "data": {
-          "call_id": "tool-1",
-          "phase": "requested"
-        }
-      }
-    },
-    {
-      "name": "approval.observed",
-      "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
-        "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "approval.observed",
-        "data": {
-          "request_id": "approval-1",
-          "phase": "resolved",
-          "decision": "allowed"
-        }
-      }
-    },
-    {
-      "name": "lifecycle.observed",
-      "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
-        "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "lifecycle.observed",
-        "data": {
-          "phase": "ended",
-          "scope": "agent_turn",
-          "outcome": "completed"
-        }
-      }
-    },
-    {
-      "name": "state.reported",
-      "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
-        "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "state.reported",
-        "data": {
-          "state": "completed"
-        }
-      }
-    },
-    {
-      "name": "source.heartbeat",
-      "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
-        "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "source.heartbeat",
-        "data": {}
-      }
-    },
-    {
-      "name": "defaults",
-      "event": {
-        "schema": 2,
-        "producer_id": "example",
-        "event_id": "minimal",
-        "agent": "新工具",
-        "session_id": "session",
-        "kind": "source.heartbeat",
-        "data": {}
+        "agent": "pi",
+        "session_id": "s",
+        "operation_id": "run-1",
+        "state": "idle",
+        "reported_basis": "native_event"
       }
     }
   ],
   "invalid": [
     {
-      "name": "unknown_type",
+      "name": "raw_fact",
       "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
+        "schema": 3,
+        "producer_id": "pi-status",
         "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "raw.native",
-        "data": {}
-      }
-    },
-    {
-      "name": "server_spoof",
-      "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
-        "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "state.reported",
-        "data": {
-          "state": "working"
-        },
-        "origin": "file"
-      }
-    },
-    {
-      "name": "raw_body",
-      "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
-        "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "message.observed",
-        "data": {
-          "role": "assistant",
-          "content": "PRIVATE"
-        }
-      }
-    },
-    {
-      "name": "bad_tool",
-      "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
-        "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "tool.observed",
-        "data": {
-          "phase": "requested"
-        }
+        "agent": "pi",
+        "session_id": "s",
+        "operation_id": "run-1",
+        "state": "working",
+        "reported_basis": "native_event",
+        "kind": "message.observed"
       }
     },
     {
       "name": "missing_operation",
       "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
+        "schema": 3,
+        "producer_id": "pi-status",
         "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "kind": "state.reported",
-        "data": {
-          "state": "completed"
-        }
+        "agent": "pi",
+        "session_id": "s",
+        "state": "working",
+        "reported_basis": "native_event"
       }
     },
     {
-      "name": "bad_scope",
+      "name": "unknown_state",
       "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
+        "schema": 3,
+        "producer_id": "pi-status",
         "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "lifecycle.observed",
-        "data": {
-          "phase": "ended",
-          "scope": "task",
-          "outcome": "completed"
-        }
+        "agent": "pi",
+        "session_id": "s",
+        "operation_id": "run-1",
+        "state": "busy",
+        "reported_basis": "native_event"
       }
     },
     {
-      "name": "sequence_without_stream",
+      "name": "raw_content",
       "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
+        "schema": 3,
+        "producer_id": "pi-status",
         "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "input.observed",
-        "data": {},
-        "source_sequence": 1
-      }
-    },
-    {
-      "name": "schema1",
-      "event": {
-        "schema": 1,
-        "producer_id": "example-adapter",
-        "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "input.observed",
-        "data": {}
-      }
-    },
-    {
-      "name": "null_data",
-      "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
-        "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "input.observed",
-        "data": null
-      }
-    },
-    {
-      "name": "multi_word_enum",
-      "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
-        "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "state.reported",
-        "data": {
-          "state": "working tool_activity"
-        }
-      }
-    },
-    {
-      "name": "empty_session_namespace",
-      "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
-        "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "state.reported",
-        "data": {
-          "state": "completed"
-        }
-      }
-    },
-    {
-      "name": "empty_operation_id",
-      "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
-        "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "",
-        "kind": "state.reported",
-        "data": {
-          "state": "completed"
-        }
-      }
-    },
-    {
-      "name": "empty_native_type",
-      "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
-        "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "state.reported",
-        "data": {
-          "state": "completed"
-        },
-        "native_type": ""
-      }
-    },
-    {
-      "name": "empty_reported_basis",
-      "event": {
-        "schema": 2,
-        "producer_id": "example-adapter",
-        "event_id": "event-1",
-        "agent": "custom-agent",
-        "session_namespace": "local",
-        "session_id": "session-1",
-        "operation_id": "operation-1",
-        "kind": "state.reported",
-        "data": {
-          "state": "completed"
-        },
-        "reported_basis": ""
+        "agent": "pi",
+        "session_id": "s",
+        "operation_id": "run-1",
+        "state": "working",
+        "reported_basis": "native_event",
+        "prompt": "secret"
       }
     }
   ]

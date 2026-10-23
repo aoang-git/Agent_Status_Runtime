@@ -46,12 +46,12 @@ public sealed class InterpreterTests
         {
             var message=F(2,"message.observed",new(){Role="assistant",StopReason=agent=="pi"?"stop":"end_turn",HasTools=false},agent:agent);
             var input=F(1,"input.observed",agent:agent);
-            var session=Project(input,message);Assert.AreEqual("idle",session.State);Assert.AreEqual("inferred",session.Confidence);Assert.IsNull(session.Outcome);
+            var session=DefaultInterpreter.Project([Ledger(input,message)],Now.AddSeconds(3)).Single();Assert.AreEqual("idle",session.State);Assert.AreEqual("inferred",session.Confidence);Assert.IsNull(session.Outcome);
             Assert.AreEqual("unknown",Project(input,message with {Data=message.Data with {StopReason="max_tokens"}}).State);
             Assert.AreEqual("unknown",Project(input,message with {Data=message.Data with {Outcome="failed"}}).State);
-            session=DefaultInterpreter.Project([Ledger(input,message) with {Coverage="partial"}],Now).Single();
+            session=DefaultInterpreter.Project([Ledger(input,message) with {Coverage="partial"}],Now.AddSeconds(3)).Single();
             Assert.AreNotEqual("idle",session.State);
-            session=DefaultInterpreter.Project([Ledger(input,message) with {Coverage="partial",IncompleteOperations=[]}],Now).Single();
+            session=DefaultInterpreter.Project([Ledger(input,message) with {Coverage="partial",IncompleteOperations=[]}],Now.AddSeconds(3)).Single();
             Assert.AreEqual("idle",session.State,"历史任务裁剪不能永久阻止当前完整任务的空闲推断。");
         }
     }
@@ -61,7 +61,7 @@ public sealed class InterpreterTests
     {
         var started=F(2,"lifecycle.observed",new(){Phase="started",Scope="agent_turn"},op:"b",agent:"codex");
         var session=Project(F(1,"input.observed",agent:"codex"),started,F(3,"lifecycle.observed",new(){Phase="ended",Scope="agent_turn",Outcome="completed"},agent:"codex"));
-        Assert.AreEqual("b",session.TurnId);Assert.AreEqual("working",session.State);Assert.IsNull(session.Outcome);
+        Assert.AreEqual("a",session.TurnId);Assert.AreEqual("idle",session.State);Assert.AreEqual("completed",session.Outcome);
         var heartbeat=F(4,"source.heartbeat",op:"b",agent:"codex") with {ReceivedAt=Now.AddMinutes(3),OccurredAt=Now.AddMinutes(3)};
         session=DefaultInterpreter.Project([Ledger(started,heartbeat)],Now.AddMinutes(3)).Single();
         Assert.AreEqual("unknown",session.State);Assert.AreEqual("stale",session.Freshness);Assert.AreEqual(Now,session.UpdatedAt);
@@ -87,7 +87,7 @@ public sealed class InterpreterTests
         Assert.AreEqual("b",session.TurnId);Assert.AreEqual(Now.AddSeconds(1),session.UpdatedAt);
         session=Project(F(1,"input.observed"),F(2,"tool.observed",new(){CallId="old",Phase="requested"}),
             F(3,"session.observed",new(){BranchChanged=true},op:""),F(4,"message.observed",new(){Role="assistant",StopReason="stop"},op:""));
-        Assert.AreEqual("unknown",session.State);Assert.IsNull(session.TurnId);
+        Assert.AreEqual("working",session.State);Assert.AreEqual("",session.TurnId);
         session=Project(F(1,"lifecycle.observed",new(){Phase="started",Scope="agent_turn"}),
             F(2,"lifecycle.observed",new(){Phase="ended",Scope="agent_turn",Outcome="unknown"}));
         Assert.AreEqual("unknown",session.State);Assert.IsNull(session.Outcome);
@@ -98,7 +98,7 @@ public sealed class InterpreterTests
     {
         var state=new MonitorState();
         string Json(object v)=>JsonSerializer.Serialize(v,Wire.Json);
-        state.Apply(new("a:0","snapshot",Json(new RuntimeSnapshot(2,"a",0,[]))));
+        state.Apply(new("a:0","ready",Json(new StreamBoundary(3,"a",0))));
         var first=F(1,"lifecycle.observed",new(){Phase="ended",Scope="agent_turn",Outcome="completed"},agent:"codex");
         var duplicate=first with {Id=2,Origin="external",SourceId="external"};
         foreach(var f in new[]{first,duplicate})state.Apply(new($"a:{f.Id}","fact",Json(f)));

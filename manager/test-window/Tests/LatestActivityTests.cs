@@ -15,9 +15,8 @@ public sealed class LatestActivityTests
         SessionId = "session", SourceId = "source", Origin = "file", OperationId = op,
         ReceivedAt = Start, OccurredAt = Start, Kind = kind, Data = data ?? new()
     };
-    private static SseMessage Snapshot(long revision = 0, string type = "snapshot", params Fact[] facts) =>
-        new($"a:{revision}", type, Json(new RuntimeSnapshot(2, "a", revision,
-            facts.Length == 0 ? [] : [new("codex", "local", "session", "source", "file", facts)])));
+    private static SseMessage Snapshot(long revision = 0, string type = "ready", params Fact[] facts) =>
+        new($"a:{revision}", type == "reset" ? "gap" : type, Json(new StreamBoundary(3, "a", revision)));
     private static MonitorState Empty()
     {
         var state = new MonitorState(); state.Apply(Snapshot(), Start); return state;
@@ -35,7 +34,7 @@ public sealed class LatestActivityTests
             var state = new MonitorState(); state.Apply(Snapshot(1, facts: [fact]), Start);
             Assert.IsNull(Current(state, 1));
             Assert.IsFalse(state.View(Start).Events.Any(e => e.IsNotification));
-            state.Reconcile(new(2, "a", 2, [new("codex", "local", "session", "source", "file", [F(2)])]));
+            state.ImportRecent(new(3, "a", 2, [F(2)]));
             Assert.IsNull(Current(state, 2));
         }
     }
@@ -132,8 +131,8 @@ public sealed class LatestActivityTests
         var state = Empty(); Apply(state, F(1), 0);
         Apply(state, End(2, "unknown"), 30);
         Assert.AreEqual("unknown", Current(state, 31)!.State);
-        Assert.IsNull(Current(state, 329)!.EndedAt);
-        Assert.IsNotNull(Current(state, 330)!.EndedAt);
+        Assert.IsNull(Current(state, 299)!.EndedAt);
+        Assert.IsNotNull(Current(state, 300)!.EndedAt);
         state = Empty(); Apply(state, F(1), 0); Apply(state, End(2, "interrupted"), 30);
         Assert.AreEqual("interrupted", Current(state, 30)!.Outcome);
         Assert.IsNull(Current(state, 40));
@@ -146,7 +145,8 @@ public sealed class LatestActivityTests
         state.ResetMonitoring(); Assert.IsNull(Current(state, 10));
         state.Apply(Snapshot(1, facts: [F(1)]), Start.AddSeconds(20));
         Assert.IsNull(Current(state, 20));
-        Apply(state, F(2) with { Historical = true }, 30);
+        Assert.Throws<InvalidDataException>(() => Apply(state, F(2) with { Historical = true }, 30));
+        state.Apply(Snapshot(2), Start.AddSeconds(30));
         Assert.IsNull(Current(state, 30));
         Apply(state, F(3), 40); Assert.IsNotNull(Current(state, 40));
         state.Apply(Snapshot(4, "reset", F(4)), Start.AddSeconds(50));
@@ -175,10 +175,49 @@ public sealed class LatestActivityTests
         Assert.AreEqual("completed", Current(state, 11)!.Outcome);
         Assert.IsNull(Current(state, 11)!.StartedAt, "没有观察到开始，不恢复历史时长。");
         Apply(state, F(3, "source.heartbeat"), 15);
-        state.Reconcile(new(2, "a", 3, []));
+        state.ImportRecent(new(3, "a", 3, []));
         Assert.IsNull(Current(state, 20));
         Apply(state, F(4), 30);
         Apply(state, F(5, "state.reported", new() { State = "idle" }, agent: "pi"), 31);
         Assert.IsNull(Current(state, 31));
+    }
+    [TestMethod]
+    public void PluginStatesAndFileFactsUseStrictLatestOrderWithoutResettingClock()
+    {
+        var state = Empty(); Apply(state, F(1), 0);
+        Apply(state, F(2, "tool.observed", new() { Phase = "requested", CallId = "pending" }), 10);
+        Apply(state, F(3, "state.reported", new() { State = "working" }) with { Origin = "external", ReportedBasis = "native_event" }, 20);
+        Assert.AreEqual("working", Current(state, 20)!.State);
+        Assert.AreEqual(Start, Current(state, 20)!.StartedAt);
+        Apply(state, F(4, "state.reported", new() { State = "waiting_confirmation" }) with { Origin = "external" }, 30);
+        Apply(state, F(5, "message.observed", new() { Role = "assistant" }), 40);
+        Assert.AreEqual("working", Current(state, 40)!.State);
+        Apply(state, F(6, "state.reported", new() { State = "completed" }) with { Origin = "external" }, 50);
+        Apply(state, F(7, "message.observed", new() { Role = "assistant" }), 51);
+        Assert.AreEqual(Start.AddSeconds(51), Current(state, 51)!.StartedAt);
+    }
+
+    [TestMethod]
+    public void UnknownDoesNotRenewTimeoutAndSequenceGapDisablesEarlyInference()
+    {
+        var state = Empty(); Apply(state, F(1, agent: "pi"), 0);
+        Apply(state, F(2, "state.reported", new() { State = "unknown" }, "pi", op: "") with { Origin = "external" }, 200);
+        Assert.IsNotNull(Current(state, 300)!.EndedAt);
+        state = Empty(); Apply(state, F(1, agent: "pi") with { SequenceGap = true }, 0);
+        Apply(state, F(2, "message.observed", new() { Role = "assistant", StopReason = "stop", HasTools = false }, "pi"), 10);
+        Assert.IsNull(Current(state, 14)!.EndedAt);
+        state = Empty(); Apply(state, F(1, agent: "pi"), 0);
+        Apply(state, F(2, "message.observed", new() { Role = "assistant", StopReason = "stop" }, "pi"), 10);
+        Apply(state, F(3, "source.health", new() { Health = "degraded" }, "pi"), 11);
+        Assert.IsNull(Current(state, 14)!.EndedAt);
+    }
+    [TestMethod]
+    public void NewEndOutcomeUsesLatestReportWithoutRestartingTaskClock()
+    {
+        var state = Empty(); Apply(state, F(1), 0); Apply(state, End(2), 10);
+        Apply(state, End(3, "interrupted"), 11);
+        Assert.AreEqual("interrupted", Current(state, 11)!.Outcome);
+        Assert.AreEqual(Start, Current(state, 11)!.StartedAt);
+        Assert.AreEqual(Start.AddSeconds(10), Current(state, 11)!.EndedAt);
     }
 }

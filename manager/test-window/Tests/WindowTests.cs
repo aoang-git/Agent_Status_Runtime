@@ -83,7 +83,7 @@ public sealed class WindowTests
                         ticks++;
                         if(ticks==3)
                         {
-                            state.Apply(new("ui:0","snapshot",Json(new RuntimeSnapshot(2,"ui",0,[]))));
+                            state.Apply(new("ui:0","ready",Json(new StreamBoundary(3,"ui",0))));
                             state.Apply(new("ui:1","fact",Json(input)));
                             state.Apply(new("ui:2","fact",Json(tool)));
                             Descendants(form).OfType<TabControl>().Single().SelectedIndex=1;
@@ -94,7 +94,7 @@ public sealed class WindowTests
                             grid.CurrentCell=grid.Rows[2].Cells[0];
                             var detail=Descendants(Descendants(form).OfType<TabControl>().Single().TabPages[1]).OfType<TextBox>().Single();
                             StringAssert.Contains(detail.Text,"ui-selected-call","点击事实后必须显示该行详情。");
-                            state.Reconcile(new(2,"ui",2,[new("codex","test","ui-session","test","file",[input,tool])]));
+                            state.ImportRecent(new(3,"ui",2,[input,tool]));
                         }
                         if(ticks==30)
                         {
@@ -182,8 +182,8 @@ public sealed class WindowTests
                 var now = DateTimeOffset.UtcNow;
                 var end = new Fact { Id = 1, Agent = "codex", SessionNamespace = "test", SessionId = "session", SourceId = "test", Origin = "file",
                     OperationId = "op", Kind = "lifecycle.observed", Data = new() { Phase = "ended", Scope = "agent_turn", Outcome = "completed" } };
-                controller.State.Apply(new("ui:1", "snapshot", Json(new RuntimeSnapshot(2, "ui", 1,
-                    [new("codex", "test", "session", "test", "file", [end], "partial")], "partial"))), now);
+                controller.State.ImportRecent(new(3, "ui", 1, [end]));
+                controller.State.Apply(new("ui:1", "ready", Json(new StreamBoundary(3, "ui", 1))), now);
                 var banner = (Control)typeof(MainForm).GetField("statusLabel", flags)!.GetValue(form)!;
                 void Render()
                 {
@@ -191,11 +191,20 @@ public sealed class WindowTests
                     typeof(MainForm).GetMethod("Render", flags)!.Invoke(form, null);
                 }
                 Render(); Assert.AreEqual("已连接 | 无活动", banner.Text);
+                Capture("v3-ready");
+                void Capture(string name)
+                {
+                    if (Environment.GetEnvironmentVariable("AGENT_STATUS_QA_DIR") is not { Length: > 0 } output) return;
+                    Directory.CreateDirectory(output);
+                    using var bitmap = new Bitmap(form.Width, form.Height);
+                    form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, form.Size));
+                    bitmap.Save(Path.Combine(output, name + ".png"));
+                }
                 var input = end with { Id = 2, OperationId = "new", Kind = "input.observed", Data = new() };
                 controller.State.Apply(new("ui:2", "fact", Json(input)), now.AddSeconds(-60));
-                Render(); StringAssert.Contains(banner.Text, "Codex：工作中 · 1m");
+                Render(); StringAssert.Contains(banner.Text, "Codex：工作中 · 1m"); Capture("v3-working");
                 controller.State.Apply(new("ui:3", "fact", Json(end with { Id = 3, OperationId = "new" })), now.AddSeconds(-11));
-                Render(); Assert.AreEqual("已连接 | 无活动", banner.Text);
+                Render(); Assert.AreEqual("已连接 | 无活动", banner.Text); Capture("v3-cleared");
                 Assert.IsFalse(Directory.Exists(Path.Combine(root.Path, "private")));
                 form.Close();
             }

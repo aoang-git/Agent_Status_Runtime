@@ -1,0 +1,1 @@
+Build script embeds the current Windows runtime here and removes it after building.

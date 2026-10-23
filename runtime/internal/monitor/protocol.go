@@ -98,7 +98,7 @@ func DecodeInput(b []byte) (InputEvent, error) {
 	if d.Decode(&e) != nil {
 		return e, errors.New("invalid_field")
 	}
-	if e.Schema != 2 {
+	if e.Schema != 3 {
 		return e, errors.New("unsupported_schema")
 	}
 	list, ok := dataFields[e.Kind]
@@ -169,7 +169,7 @@ func DecodeInput(b []byte) (InputEvent, error) {
 			return e, errors.New("operation_required")
 		}
 	case "state.reported":
-		if !contains("working tool_activity waiting_confirmation idle completed interrupted failed unknown offline", e.Data.State) {
+		if !contains("working tool_activity waiting_confirmation idle completed interrupted failed unknown", e.Data.State) {
 			return e, errors.New("invalid_state")
 		}
 		if contains("completed interrupted failed", e.Data.State) && e.OperationID == "" {
@@ -180,4 +180,46 @@ func DecodeInput(b []byte) (InputEvent, error) {
 }
 func validText(s string) bool {
 	return s != "" && utf8.RuneCountInString(s) <= 256 && !strings.ContainsFunc(s, unicode.IsControl)
+}
+
+func DecodeReport(b []byte) (InputEvent, error) {
+	if !utf8.Valid(b) {
+		return InputEvent{}, errors.New("invalid_json")
+	}
+	var raw map[string]json.RawMessage
+	if len(b) > MaxInput {
+		return InputEvent{}, errors.New("body_too_large")
+	}
+	d := json.NewDecoder(bytes.NewReader(b))
+	if err := uniqueJSON(d); err != nil {
+		return InputEvent{}, errors.New("invalid_json")
+	}
+	if _, err := d.Token(); err != io.EOF {
+		return InputEvent{}, errors.New("invalid_json")
+	}
+	if json.Unmarshal(b, &raw) != nil || raw == nil {
+		return InputEvent{}, errors.New("invalid_report")
+	}
+	for k := range raw {
+		if !contains("schema producer_id event_id agent session_namespace session_id operation_id occurred_at state reported_basis native_type native_reason stream_id source_sequence", k) {
+			return InputEvent{}, errors.New("invalid_field")
+		}
+	}
+	if len(raw["state"]) == 0 || len(raw["reported_basis"]) == 0 {
+		return InputEvent{}, errors.New("state_and_basis_required")
+	}
+	raw["kind"] = json.RawMessage(`"state.reported"`)
+	state := raw["state"]
+	delete(raw, "state")
+	data, _ := json.Marshal(map[string]json.RawMessage{"state": state})
+	raw["data"] = data
+	encoded, _ := json.Marshal(raw)
+	f, err := DecodeInput(encoded)
+	if err != nil {
+		return f, err
+	}
+	if contains("working tool_activity waiting_confirmation completed interrupted failed", f.Data.State) && f.OperationID == "" {
+		return f, errors.New("operation_required")
+	}
+	return f, nil
 }

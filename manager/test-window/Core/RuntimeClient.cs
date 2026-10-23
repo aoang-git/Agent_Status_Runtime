@@ -55,15 +55,12 @@ public sealed class RuntimeClient : IDisposable
         return Encoding.UTF8.GetString(body.ToArray());
     }
 
-    public async Task SubscribeAsync(RuntimeConnection connection, Cursor? cursor, Func<SseMessage, Task> onMessage,
+    public async Task SubscribeAsync(RuntimeConnection connection, Func<SseMessage, Task> onMessage,
         Action onReceive, CancellationToken cancellationToken)
     {
-        using var request = Request(connection, "/v2/events");
-        if (cursor is not null) request.Headers.Add("Last-Event-ID", cursor.ToString());
+        using var request = Request(connection, "/v3/events");
         using var headersTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        // When resuming at the latest cursor the Runtime flushes its first
-        // response on the 15-second heartbeat, not immediately.
-        headersTimeout.CancelAfter(TimeSpan.FromSeconds(25));
+        headersTimeout.CancelAfter(TimeSpan.FromSeconds(5));
         using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, headersTimeout.Token);
         EnsureSuccess(response);
         if (response.Content.Headers.ContentType?.MediaType != "text/event-stream")

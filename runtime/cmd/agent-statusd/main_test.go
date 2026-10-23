@@ -37,7 +37,7 @@ func cliInput(t *testing.T, body string, args ...string) (string, error) {
 	return string(b), err
 }
 
-const reportExample = `{"schema":2,"producer_id":"adapter","event_id":"stable","agent":"custom","session_id":"s","operation_id":"op","kind":"state.reported","data":{"state":"completed"}}`
+const reportExample = `{"schema":3,"producer_id":"adapter","event_id":"stable","agent":"custom","session_id":"s","operation_id":"op","state":"completed","reported_basis":"self_report"}`
 
 func TestReportOfflineValidationAndPromptDoNotStartService(t *testing.T) {
 	dir := t.TempDir()
@@ -68,7 +68,7 @@ func TestReportRereadsRotatedCredentialAndRetriesSameEvent(t *testing.T) {
 	requests := 0
 	var server *httptest.Server
 	writeConnection := func(token string) {
-		b, _ := json.Marshal(connection{server.URL, token})
+		b, _ := json.Marshal(connection{URL: server.URL, Token: token})
 		if err := os.WriteFile(filepath.Join(private, "ingest.json"), b, 0600); err != nil {
 			t.Error(err)
 		}
@@ -84,11 +84,11 @@ func TestReportRereadsRotatedCredentialAndRetriesSameEvent(t *testing.T) {
 			w.WriteHeader(401)
 			return
 		}
-		if r.URL.Path != "/v2/ingest" || r.Header.Get("Authorization") != "Bearer new" {
+		if r.URL.Path != "/v3/ingest" || r.Header.Get("Authorization") != "Bearer new" {
 			t.Error("wrong write credential")
 		}
 		w.WriteHeader(201)
-		_, _ = w.Write([]byte(`{"schema":2,"id":1,"epoch":"test","duplicate":false}`))
+		_, _ = w.Write([]byte(`{"schema":3,"id":1,"epoch":"test","duplicate":false}`))
 	}))
 	defer server.Close()
 	writeConnection("old")
@@ -108,14 +108,14 @@ func TestReportHasOneSecondBudgetAndRejectsNonLoopbackConnection(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "private"), 0700)
 	path := filepath.Join(dir, "private", "ingest.json")
-	b, _ := json.Marshal(connection{server.URL, "token"})
+	b, _ := json.Marshal(connection{URL: server.URL, Token: "token"})
 	_ = os.WriteFile(path, b, 0600)
 	start := time.Now()
 	_, err := cliInput(t, reportExample, "report", "--data-dir", dir)
 	if err == nil || time.Since(start) > 1500*time.Millisecond {
 		t.Fatal("report exceeded bounded send budget", err)
 	}
-	b, _ = json.Marshal(connection{"http://example.com", "SECRET"})
+	b, _ = json.Marshal(connection{URL: "http://example.com", Token: "SECRET"})
 	_ = os.WriteFile(path, b, 0600)
 	if _, err = loadConnection(dir, "ingest.json"); err == nil || strings.Contains(err.Error(), "SECRET") {
 		t.Fatal("unsafe connection")
